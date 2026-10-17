@@ -2,13 +2,15 @@
 S5 permission flow integration tests.
 
 No daemon subprocess needed — uses AgentRunner in-process with a mock LLM
-provider and the real PermissionManager. BashTool runs real subprocesses, so
-commands must be safe (echo, true).
+provider and the real PermissionManager. Sandbox execution is stubbed here;
+actual OS isolation is verified by test_sandbox_native.py.
 """
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
+import pytest
 from pydantic import BaseModel
 
 from kama_claude.core.config import KamaConfig
@@ -16,6 +18,17 @@ from kama_claude.core.events.bus import EventBus
 from kama_claude.core.llm.types import LlmResponse, ToolCallBlock
 from kama_claude.core.permissions.manager import PermissionManager
 from kama_claude.core.runner import AgentRunner
+from kama_claude.core.sandbox import SandboxExecResult
+
+
+# 功能：让审批流程测试与宿主平台及沙盒安装状态无关
+# 设计：仅替换准备和执行边界，保留 Bash 工具、审批管理器及工具事件链
+@pytest.fixture(autouse=True)
+def stub_sandbox_execution(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    executor = AsyncMock(return_value=SandboxExecResult(0, "hello"))
+    monkeypatch.setattr("kama_claude.core.sandbox.SandboxManager.prepare", Mock())
+    monkeypatch.setattr("kama_claude.core.tools.builtin.bash.spawn", executor)
+    return executor
 
 # ── stub providers ────────────────────────────────────────────────────────────
 

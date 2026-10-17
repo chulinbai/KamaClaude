@@ -1,0 +1,7 @@
+; 仅在全盘可读且没有读取禁止项时启用偏好设置服务。
+(allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow mach-lookup
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.cfprefsd.agent")
+  (local-name "com.apple.cfprefsd.agent"))
+(allow user-preference-read)

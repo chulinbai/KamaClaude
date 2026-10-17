@@ -14,6 +14,7 @@ from kama_claude.core.events.bus import EventBus
 from kama_claude.core.events.writer import EventWriter
 from kama_claude.core.loop import AgentLoop
 from kama_claude.core.runs import new_run_id
+from kama_claude.core.sandbox.models import WindowsSandboxConfig
 from kama_claude.core.subagent.registry import BackgroundTaskRegistry
 from kama_claude.core.tools.base import BaseTool, ToolResult
 from kama_claude.core.tools.builtin.bash import BashTool
@@ -93,6 +94,7 @@ class SpawnAgentTool(BaseTool):
         runs_dir: Path,
         session_id: str,
         depth: int = 0,
+        windows_sandbox: WindowsSandboxConfig | None = None,
     ) -> None:
         self._provider = provider
         self._parent_bus = parent_bus
@@ -103,6 +105,7 @@ class SpawnAgentTool(BaseTool):
         self._runs_dir = runs_dir
         self._session_id = session_id
         self._depth = depth
+        self._windows_sandbox = windows_sandbox or WindowsSandboxConfig()
 
     # 派生子 agent，前台时阻塞直到完成并返回结果，后台时立即返回 run_id
     async def invoke(self, params: dict[str, object]) -> ToolResult:
@@ -236,7 +239,7 @@ class SpawnAgentTool(BaseTool):
         registry = ToolRegistry()
         _all_tools = [
             ReadFileTool(),
-            BashTool(),
+            BashTool(windows=self._windows_sandbox),
             WriteFileTool(),
             ListDirTool(),
         ]
@@ -265,6 +268,7 @@ class SpawnAgentTool(BaseTool):
                 runs_dir=self._runs_dir,
                 session_id=self._session_id,
                 depth=self._depth + 1,
+                windows_sandbox=self._windows_sandbox,
             )
             if _allowed("spawn_agent"):
                 registry.register(nested)

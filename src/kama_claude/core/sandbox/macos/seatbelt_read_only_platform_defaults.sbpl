@@ -1,0 +1,11 @@
+; 限制读取模式下，保留启动 shell、动态加载器和基础运行库需要的路径。
+(allow file-read* file-test-existence
+  (subpath "/bin") (subpath "/sbin") (subpath "/usr/bin")
+  (subpath "/usr/sbin") (subpath "/usr/lib") (subpath "/usr/libexec")
+  (subpath "/System/Library") (subpath "/Library/Apple/System/Library")
+  (literal "/private/etc/localtime") (literal "/private/etc/passwd")
+  (literal "/private/etc/group"))
+(allow file-read-metadata
+  (literal "/") (literal "/private") (literal "/private/var")
+  (literal "/tmp") (literal "/var") (literal "/etc")
+  (literal "/System/Volumes") (literal "/System/Volumes/Data"))

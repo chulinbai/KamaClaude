@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+
+from kama_claude.core.sandbox.models import NetworkPolicy, WindowsSandboxConfig
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7437
@@ -73,6 +75,11 @@ class McpConfig:
 
 
 @dataclass
+class SandboxConfig:
+    windows: WindowsSandboxConfig = field(default_factory=WindowsSandboxConfig)
+
+
+@dataclass
 class KamaConfig:
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
@@ -83,6 +90,7 @@ class KamaConfig:
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
 
 # 构建并返回运行时配置：默认值 → 全局 TOML → 项目本地 TOML → .env → 系统环境变量（后者优先级最高）
@@ -117,9 +125,41 @@ def get_config() -> KamaConfig:
 
 # 将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp"}
+    unknown = set(data.keys()) - {
+        "core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "sandbox",
+    }
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
+
+    if "sandbox" in data:
+        sandbox = data["sandbox"]
+        if not isinstance(sandbox, dict) or set(sandbox) - {"windows"}:
+            raise SystemExit("Config error: [sandbox] only accepts windows")
+        windows = sandbox.get("windows", {})
+        keys = {"mxc_executable", "network", "readonly_paths", "readwrite_paths", "denied_paths"}
+        if not isinstance(windows, dict) or set(windows) - keys:
+            raise SystemExit("Config error: invalid [sandbox.windows] keys")
+        current = config.sandbox.windows
+        for key, value in windows.items():
+            if key in ("readonly_paths", "readwrite_paths", "denied_paths"):
+                if not isinstance(value, list) or not all(isinstance(p, str) and p for p in value):
+                    raise SystemExit(f"Config error: sandbox.windows.{key} must be a path array")
+                paths = tuple(Path(p) for p in value)
+                if key == "readonly_paths":
+                    current = replace(current, readonly_paths=paths)
+                elif key == "readwrite_paths":
+                    current = replace(current, readwrite_paths=paths)
+                else:
+                    current = replace(current, denied_paths=paths)
+            elif key == "network":
+                if value not in ("allow", "deny"):
+                    raise SystemExit("Config error: sandbox.windows.network must be allow or deny")
+                current = replace(current, network=NetworkPolicy(value))
+            else:
+                if not isinstance(value, str) or not value:
+                    raise SystemExit("Config error: sandbox.windows.mxc_executable must be a path")
+                current = replace(current, mxc_executable=Path(value).expanduser())
+        config.sandbox.windows = current
 
     if "core" in data:
         core = data["core"]
@@ -293,6 +333,11 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
 
 # 用 KAMA_* 环境变量覆盖 config 中对应字段（若变量已设置）
 def _apply_env(config: KamaConfig) -> None:
+    executable = os.environ.get("KAMA_MXC_EXECUTABLE")
+    if executable:
+        config.sandbox.windows = replace(
+            config.sandbox.windows, mxc_executable=Path(executable).expanduser(),
+        )
     host = os.environ.get("KAMA_HOST")
     if host is not None:
         config.host = host

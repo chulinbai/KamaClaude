@@ -96,7 +96,8 @@ class AgentRunner:
             return allowed is None or name in allowed
 
         registry = ToolRegistry()
-        for t in [ReadFileTool(), BashTool(), WriteFileTool(), ListDirTool()]:
+        for t in [ReadFileTool(), BashTool(windows=self._config.sandbox.windows),
+                  WriteFileTool(), ListDirTool()]:
             if _ok(t.name):
                 registry.register(t)
         for t in [
@@ -125,6 +126,7 @@ class AgentRunner:
                         runs_dir=runs_dir,
                         session_id=session_id,
                         depth=0,
+                        windows_sandbox=self._config.sandbox.windows,
                     )
                 )
             if _ok("agent_result"):

@@ -275,10 +275,18 @@ class CoreApp:
 
         loop = asyncio.get_running_loop()
         shutdown = asyncio.Event()
-        loop.add_signal_handler(signal.SIGINT, shutdown.set)
-        loop.add_signal_handler(signal.SIGTERM, shutdown.set)
-
-        await shutdown.wait()
+        previous_handlers = {}
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(signum, shutdown.set)
+            except NotImplementedError:
+                previous_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, lambda *_: loop.call_soon_threadsafe(shutdown.set))
+        try:
+            await shutdown.wait()
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
 
         logger.info("shutting down")
         for run_task in list(self._running_runs):

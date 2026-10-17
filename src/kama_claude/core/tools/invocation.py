@@ -147,7 +147,7 @@ async def invoke_tool(
 
         try:
             result = await asyncio.wait_for(
-                tool.invoke(dict(tool_call.input)), timeout=timeout
+                tool.invoke(dict(tool_call.input)), timeout=timeout + tool.execution_overhead_s
             )
             ms = elapsed()
 
@@ -173,7 +173,8 @@ async def invoke_tool(
         except TimeoutError:
             return await _fail(
                 bus, run_id, tool_call,
-                "timeout", f"tool timed out after {timeout}s", elapsed(),
+                "timeout", f"tool timed out after {timeout + tool.execution_overhead_s}s",
+                elapsed(),
                 attempt=attempt,
             )
         except Exception as exc:

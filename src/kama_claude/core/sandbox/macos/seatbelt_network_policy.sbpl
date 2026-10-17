@@ -1,0 +1,11 @@
+; 只提供 DNS、配置与证书服务访问，IP 连接授权由策略生成器加入。
+(allow system-socket
+  (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))
+(allow mach-lookup
+  (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+  (global-name "com.apple.SystemConfiguration.configd")
+  (global-name "com.apple.networkd")
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.trustd")
+  (global-name "com.apple.trustd.agent")
+  (global-name "com.apple.ocspd"))

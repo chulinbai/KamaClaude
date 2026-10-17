@@ -11,6 +11,32 @@ from collections.abc import AsyncGenerator
 import pytest
 
 
+# 功能：仅在具备真实平台后端时运行操作系统沙盒集成测试
+# 设计：普通跨平台测试显式跳过缺失依赖；设置必测变量后缺失依赖直接失败
+@pytest.fixture
+def native_sandbox() -> None:
+    from pathlib import Path
+
+    from kama_claude.core.sandbox import SandboxUnavailableError
+
+    try:
+        if sys.platform == "linux":
+            from kama_claude.core.sandbox.linux.launcher import find_bwrap
+            from kama_claude.core.sandbox.linux.seccomp import load_seccomp
+
+            find_bwrap()
+            load_seccomp()
+        elif sys.platform == "darwin":
+            if not Path("/usr/bin/sandbox-exec").exists():
+                raise SandboxUnavailableError("sandbox-exec is unavailable")
+        else:
+            raise SandboxUnavailableError("Native sandbox tests require Linux or macOS")
+    except SandboxUnavailableError as exc:
+        if os.environ.get("KAMA_REQUIRE_NATIVE_SANDBOX") == "1":
+            pytest.fail(str(exc))
+        pytest.skip(str(exc))
+
+
 @pytest.fixture
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

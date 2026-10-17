@@ -1,0 +1,12 @@
+(version 1)
+(deny default)
+
+; 子进程继承同一策略，只允许同一沙盒内的信号与进程信息查询。
+(allow process-exec process-fork)
+(allow signal (target same-sandbox))
+(allow process-info* (target same-sandbox))
+(allow sysctl-read)
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+(allow file-read* file-write-data (literal "/dev/null") (literal "/dev/zero"))
+(allow file-read* (literal "/dev/random") (literal "/dev/urandom"))
+(allow file-read* file-write-data (subpath "/dev/fd"))

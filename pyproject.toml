@@ -64,4 +64,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: marks tests that call the real Anthropic API (require ANTHROPIC_API_KEY)",
+    "sandbox_native: verifies OS sandbox enforcement on Linux, macOS or Windows",
 ]

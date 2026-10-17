@@ -1,9 +1,23 @@
 from __future__ import annotations
 
-import asyncio
+import os
+import sys
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from kama_claude.core.sandbox import (
+    SandboxCommand,
+    SandboxError,
+    SandboxExecResult,
+    SandboxManager,
+    SandboxPolicy,
+    SandboxPolicyError,
+    WindowsSandboxConfig,
+    spawn,
+    workspace_policy,
+)
+from kama_claude.core.sandbox.macos.seatbelt_scratch import process_scratch
 from kama_claude.core.tools.base import BaseTool, ToolResult
 
 _MAX_OUTPUT_BYTES = 64 * 1024  # 64 KB
@@ -39,43 +53,75 @@ class BashTool(BaseTool):
         "required": ["command"],
     }
 
-    # 在子进程中执行 shell 命令，合并 stdout/stderr，超时或非零退出码时返回错误
+    # 固定工作区和沙盒策略，主 agent 与子 agent 默认使用同一执行边界
+    def __init__(
+        self, *, cwd: Path | None = None, policy: SandboxPolicy | None = None,
+        manager: SandboxManager | None = None,
+        windows: WindowsSandboxConfig | None = None,
+    ) -> None:
+        self._cwd = cwd or Path.cwd()
+        self._policy = policy
+        self._windows = windows or WindowsSandboxConfig()
+        self._sandbox = manager or SandboxManager(self._windows)
+        if sys.platform == "win32":
+            self.execution_overhead_s = 35.0  # Two preflights plus bounded process cleanup.
+            self.description = (
+                "Execute a Windows PowerShell command in a one-shot BaseContainer sandbox. "
+                "Use PowerShell syntax, not Bash. Non-interactive; stdin is closed. "
+                "Returns stdout and stderr combined, truncated at 64 KB."
+            )
+
+    # 审批通过后在系统沙盒中执行命令，明确返回不可重试的沙盒错误
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = BashParams.model_validate(params)
-        command = p.command
-        timeout = p.timeout
-
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+            if sys.platform == "win32":
+                from kama_claude.core.sandbox.windows.command import powershell_command
+                from kama_claude.core.sandbox.windows.policy import workspace_policy as win_policy
+                from kama_claude.core.sandbox.windows.scratch import process_scratch as win_scratch
+
+                policy = self._policy or win_policy(self._cwd, self._windows)
+                with win_scratch(policy, dict(os.environ)) as (scratch_policy, env):
+                    command = SandboxCommand(
+                        powershell_command(p.command), self._cwd, env, p.timeout, _MAX_OUTPUT_BYTES,
+                    )
+                    result = await spawn(self._sandbox.prepare(command, scratch_policy))
+                return self._result(result, p.timeout)
+            policy = self._policy or workspace_policy(self._cwd)
+            command = SandboxCommand(
+                ("/bin/sh", "-c", p.command), self._cwd, dict(os.environ),
+                p.timeout, _MAX_OUTPUT_BYTES,
             )
-            try:
-                stdout_bytes, _ = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
-            except TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                return ToolResult(
-                    content=f"[timeout after {timeout}s]",
-                    is_error=True,
-                    error_type="timeout",
-                )
-        except Exception as exc:
-            return ToolResult(content=str(exc), is_error=True, error_type="runtime_error")
-
-        output = stdout_bytes.decode("utf-8", errors="replace")
-        truncated = len(stdout_bytes) > _MAX_OUTPUT_BYTES
-        if truncated:
-            output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
-
-        returncode = proc.returncode or 0
-        if returncode != 0:
+            if sys.platform == "darwin":
+                with process_scratch(policy, command.env) as (scratch_policy, env):
+                    command = SandboxCommand(
+                        command.argv, command.cwd, env, command.timeout, command.output_limit,
+                    )
+                    result = await spawn(self._sandbox.prepare(command, scratch_policy))
+            else:
+                result = await spawn(self._sandbox.prepare(command, policy))
+        except SandboxError as exc:
+            return ToolResult(content=str(exc), is_error=True, error_type=exc.error_type)
+        except OSError as exc:
             return ToolResult(
-                content=f"[exit {returncode}]\n{output}",
+                content=f"Cannot prepare sandbox paths: {exc}", is_error=True,
+                error_type=SandboxPolicyError.error_type,
+            )
+
+        return self._result(result, p.timeout)
+
+    @staticmethod
+    def _result(result: SandboxExecResult, timeout: int) -> ToolResult:
+        output = result.output + ("\n[truncated]" if result.truncated else "")
+        if result.timed_out:
+            return ToolResult(
+                content=f"[timeout after {timeout}s]\n{output}",
+                is_error=True, error_type="timeout",
+            )
+        if result.returncode != 0:
+            return ToolResult(
+                content=f"[exit {result.returncode}]\n{output}",
                 is_error=True,
-                error_type="runtime_error",
+                error_type="sandbox_denied" if result.suspected_denial else "command_failed",
             )
         return ToolResult(content=output or "[no output]")

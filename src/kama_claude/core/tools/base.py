@@ -11,11 +11,12 @@ from pydantic import BaseModel
 class ToolResult:
     content: str
     is_error: bool = False
-    # "runtime_error" | "timeout" | "schema_error" | "permission_denied"
+    # 通用错误，以及 Bash 的 command_failed、sandbox_denied 和 sandbox_* 初始化错误
     error_type: str | None = None
 
 
 class BaseTool(ABC):
+    execution_overhead_s: float = 0
     name: str
     description: str
     input_schema: dict[str, object]

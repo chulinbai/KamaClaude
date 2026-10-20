@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Discriminator
+from pydantic import BaseModel, Discriminator, Field
+
+from kama_claude.core.permissions.paths import PathGrant
+
+
+class AgentEvent(BaseModel):
+    session_id: str | None = None
+    agent_id: str | None = None
+    parent_agent_id: str | None = None
 
 
 class CoreStartedEvent(BaseModel):
@@ -11,14 +19,14 @@ class CoreStartedEvent(BaseModel):
     version: str
 
 
-class RunStartedEvent(BaseModel):
+class RunStartedEvent(AgentEvent):
     type: Literal["run.started"] = "run.started"
     run_id: str
     goal: str
     ts: str  # ISO 8601
 
 
-class RunFinishedEvent(BaseModel):
+class RunFinishedEvent(AgentEvent):
     type: Literal["run.finished"] = "run.finished"
     run_id: str
     status: str  # "success" | "failed"
@@ -27,21 +35,21 @@ class RunFinishedEvent(BaseModel):
     ts: str
 
 
-class StepStartedEvent(BaseModel):
+class StepStartedEvent(AgentEvent):
     type: Literal["step.started"] = "step.started"
     run_id: str
     step: int
     ts: str
 
 
-class StepFinishedEvent(BaseModel):
+class StepFinishedEvent(AgentEvent):
     type: Literal["step.finished"] = "step.finished"
     run_id: str
     step: int
     ts: str
 
 
-class ToolCallStartedEvent(BaseModel):
+class ToolCallStartedEvent(AgentEvent):
     type: Literal["tool.call_started"] = "tool.call_started"
     run_id: str
     tool_use_id: str
@@ -50,7 +58,7 @@ class ToolCallStartedEvent(BaseModel):
     ts: str
 
 
-class ToolCallFinishedEvent(BaseModel):
+class ToolCallFinishedEvent(AgentEvent):
     type: Literal["tool.call_finished"] = "tool.call_finished"
     run_id: str
     tool_use_id: str
@@ -60,7 +68,7 @@ class ToolCallFinishedEvent(BaseModel):
     ts: str
 
 
-class ToolCallFailedEvent(BaseModel):
+class ToolCallFailedEvent(AgentEvent):
     type: Literal["tool.call_failed"] = "tool.call_failed"
     run_id: str
     tool_use_id: str
@@ -73,14 +81,14 @@ class ToolCallFailedEvent(BaseModel):
     ts: str
 
 
-class LlmTokenEvent(BaseModel):
+class LlmTokenEvent(AgentEvent):
     type: Literal["llm.token"] = "llm.token"
     run_id: str
     token: str
     ts: str
 
 
-class LlmUsageEvent(BaseModel):
+class LlmUsageEvent(AgentEvent):
     type: Literal["llm.usage"] = "llm.usage"
     run_id: str
     input_tokens: int
@@ -91,7 +99,7 @@ class LlmUsageEvent(BaseModel):
     ts: str
 
 
-class LlmModelSelectedEvent(BaseModel):
+class LlmModelSelectedEvent(AgentEvent):
     type: Literal["llm.model_selected"] = "llm.model_selected"
     run_id: str
     model: str
@@ -99,7 +107,7 @@ class LlmModelSelectedEvent(BaseModel):
     ts: str
 
 
-class LogLineEvent(BaseModel):
+class LogLineEvent(AgentEvent):
     type: Literal["log.line"] = "log.line"
     run_id: str
     level: str  # "DEBUG" | "INFO" | "WARNING" | "ERROR"
@@ -119,6 +127,7 @@ class SessionMessageReceivedEvent(BaseModel):
     type: Literal["session.message_received"] = "session.message_received"
     session_id: str
     content: str
+    run_id: str | None = None
     ts: str
 
 
@@ -141,7 +150,7 @@ class SessionClosedEvent(BaseModel):
     ts: str
 
 
-class ContextCompactedEvent(BaseModel):
+class ContextCompactedEvent(AgentEvent):
     type: Literal["context.compacted"] = "context.compacted"
     session_id: str
     run_id: str
@@ -150,7 +159,7 @@ class ContextCompactedEvent(BaseModel):
     ts: str
 
 
-class PermissionRequestedEvent(BaseModel):
+class PermissionRequestedEvent(AgentEvent):
     type: Literal["permission.requested"] = "permission.requested"
     run_id: str
     tool_use_id: str
@@ -158,28 +167,37 @@ class PermissionRequestedEvent(BaseModel):
     params: dict[str, Any]
     param_preview: str
     session_id: str
+    request_id: str | None = None
+    workspace: str = ""
+    reason: str = "tool_policy"
+    paths: list[PathGrant] = Field(default_factory=list)
+    allowed_decisions: list[str] = Field(default_factory=lambda: [
+        "allow_once", "always_allow", "deny_once", "always_deny",
+    ])
     ts: str
 
 
-class PermissionGrantedEvent(BaseModel):
+class PermissionGrantedEvent(AgentEvent):
     type: Literal["permission.granted"] = "permission.granted"
     run_id: str
     tool_use_id: str
+    request_id: str | None = None
     # "allow_once" | "always_allow" | "auto_allow"
     decision: str
     ts: str
 
 
-class PermissionDeniedEvent(BaseModel):
+class PermissionDeniedEvent(AgentEvent):
     type: Literal["permission.denied"] = "permission.denied"
     run_id: str
     tool_use_id: str
+    request_id: str | None = None
     # "deny_once" | "always_deny" | "auto_deny"
     decision: str
     ts: str
 
 
-class SubagentStartedEvent(BaseModel):
+class SubagentStartedEvent(AgentEvent):
     type: Literal["subagent.started"] = "subagent.started"
     run_id: str          # 子 agent run_id
     parent_run_id: str
@@ -187,7 +205,7 @@ class SubagentStartedEvent(BaseModel):
     ts: str
 
 
-class SubagentFinishedEvent(BaseModel):
+class SubagentFinishedEvent(AgentEvent):
     type: Literal["subagent.finished"] = "subagent.finished"
     run_id: str
     parent_run_id: str
@@ -195,11 +213,27 @@ class SubagentFinishedEvent(BaseModel):
     ts: str
 
 
-class SkillInvokedEvent(BaseModel):
+class SkillInvokedEvent(AgentEvent):
     type: Literal["skill.invoked"] = "skill.invoked"
     skill_name: str
     arguments: str
     run_id: str
+    ts: str
+
+
+class AgentStateEvent(AgentEvent):
+    type: Literal["subagent.state_changed"] = "subagent.state_changed"
+    run_id: str | None = None
+    snapshot: dict[str, Any]
+    ts: str
+
+
+class AgentMessageEvent(AgentEvent):
+    type: Literal["subagent.message"] = "subagent.message"
+    run_id: str | None = None
+    message_id: str
+    sender_agent_id: str
+    status: str
     ts: str
 
 
@@ -228,6 +262,8 @@ Event = Annotated[
     | PermissionDeniedEvent
     | SubagentStartedEvent
     | SubagentFinishedEvent
-    | SkillInvokedEvent,
+    | SkillInvokedEvent
+    | AgentStateEvent
+    | AgentMessageEvent,
     Discriminator("type"),
 ]

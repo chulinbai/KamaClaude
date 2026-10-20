@@ -4,7 +4,7 @@ import base64
 import json
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -123,16 +123,34 @@ def test_nested_write_cannot_reopen_denied_subtree(tmp_path: Path) -> None:
         )))
 
 
-def test_root_and_nested_agents_inherit_windows_configuration(tmp_path: Path) -> None:
+# 功能：根执行与两层子执行继承同一 Windows 沙盒配置
+# 设计：通过真实 spawn 调用共用内核，检查每层实际 BashTool 的配置对象
+async def test_root_and_nested_agents_inherit_windows_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from kama_claude.core.events.bus import EventBus
+    from kama_claude.core.llm.types import LlmResponse
     from kama_claude.core.runner import AgentRunner
     from kama_claude.core.subagent.tool import SpawnAgentTool
     from kama_claude.core.task.manager import TaskManager
 
     config = KamaConfig()
     config.sandbox.windows = replace(config.sandbox.windows, network=NetworkPolicy.ALLOW)
-    runner = AgentRunner(config, runs_dir=tmp_path)
-    registry = runner._build_registry(TaskManager(tmp_path), provider=AsyncMock(),
+    provider = AsyncMock()
+    provider.chat.return_value = LlmResponse(stop_reason="end_turn", text="done")
+    runner = AgentRunner(config, provider=provider, runs_dir=tmp_path)
+    runner.background_tasks.ensure_main()
+    built = []
+    original = runner._build_registry
+
+    # 捕获统一入口为每轮生成的工具
+    def capture(*args, **kwargs):
+        registry = original(*args, **kwargs)
+        built.append(registry)
+        return registry
+
+    monkeypatch.setattr(runner, "_build_registry", capture)
+    registry = runner._build_registry(TaskManager(tmp_path), provider=provider,
                                       bus=EventBus(), run_id="root")
     for depth in range(3):
         bash = registry.get("bash")
@@ -141,7 +159,10 @@ def test_root_and_nested_agents_inherit_windows_configuration(tmp_path: Path) ->
         if depth < 2:
             agent = registry.get("spawn_agent")
             assert isinstance(agent, SpawnAgentTool)
-            registry = agent._build_child_registry(EventBus(), f"child-{depth}", None)
+            result = await agent.invoke({"description": "nested", "prompt": "work"})
+            assert not result.is_error
+            registry = built[-1]
+    await runner.background_tasks.shutdown()
 
 
 @pytest.mark.asyncio
@@ -194,6 +215,8 @@ async def test_permission_denial_does_not_start_sandbox(monkeypatch: pytest.Monk
     registry = ToolRegistry()
     registry.register(tool)
     permissions = AsyncMock()
+    permissions.session_grants = Mock(return_value=())
+    permissions.is_closed = Mock(return_value=False)
     permissions.check_and_wait.return_value = (False, "deny")
     result = await invoke_tool(registry, ToolCallBlock(id="t", name="bash", input={"command": "x"}),
                                EventBus(), "r", permission_manager=permissions)

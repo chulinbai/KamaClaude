@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Discriminator
+from pydantic import BaseModel, Discriminator, Field
 
 from kama_claude.core.session.model import SessionMode, SessionStatus
 
@@ -21,6 +21,7 @@ class PongResult(BaseModel):
 class AgentRunCommand(BaseModel):
     type: Literal["agent.run"] = "agent.run"
     goal: str
+    workspace: str | None = Field(default=None, min_length=1)
 
 
 class AgentRunResult(BaseModel):
@@ -43,10 +44,44 @@ class SessionCreateCommand(BaseModel):
     type: Literal["session.create"] = "session.create"
     mode: SessionMode = "chat"
     title: str = ""
+    workspace: str | None = Field(default=None, min_length=1)
 
 
 class SessionCreateResult(BaseModel):
     session_id: str
+    status: SessionStatus
+
+
+class SessionListCommand(BaseModel):
+    type: Literal["session.list"] = "session.list"
+    workspace: str | None = Field(default=None, min_length=1)
+
+
+class SessionSummary(BaseModel):
+    session_id: str
+    title: str
+    updated_at: str
+    workspace: str | None
+    status: SessionStatus
+    busy: bool = False
+    attached_elsewhere: bool = False
+
+
+class SessionListResult(BaseModel):
+    sessions: list[SessionSummary]
+
+
+class SessionResumeCommand(BaseModel):
+    type: Literal["session.resume"] = "session.resume"
+    session_id: str
+    current_session_id: str | None = None
+    workspace: str | None = Field(default=None, min_length=1)
+
+
+class SessionResumeResult(BaseModel):
+    session_id: str
+    title: str
+    workspace: str | None
     status: SessionStatus
 
 
@@ -81,7 +116,9 @@ class SessionCloseResult(BaseModel):
 class PermissionRespondCommand(BaseModel):
     type: Literal["permission.respond"] = "permission.respond"
     tool_use_id: str
-    # "allow_once" | "always_allow" | "deny_once" | "always_deny"
+    request_id: str | None = None
+    session_id: str | None = None
+    # 路径审批使用 allow_once / allow_session / deny_once，禁止持久化工具授权
     decision: str
 
 
@@ -100,16 +137,56 @@ class SessionCompactResult(BaseModel):
     saved_tokens: int
 
 
+class SubagentListCommand(BaseModel):
+    type: Literal["subagent.list"] = "subagent.list"
+    session_id: str
+
+
+class SubagentResultCommand(BaseModel):
+    type: Literal["subagent.result"] = "subagent.result"
+    session_id: str
+    agent_id: str | None = None
+    run_id: str | None = None
+
+
+class SubagentSendInputCommand(BaseModel):
+    type: Literal["subagent.send_input"] = "subagent.send_input"
+    session_id: str
+    agent_id: str
+    message: str = Field(min_length=1, max_length=16384)
+    wake: bool = False
+
+
+class SubagentCloseCommand(BaseModel):
+    type: Literal["subagent.close"] = "subagent.close"
+    session_id: str
+    agent_id: str
+
+
+class SubagentListResult(BaseModel):
+    agents: list[dict[str, Any]]
+
+
+class SubagentDataResult(BaseModel):
+    data: dict[str, Any]
+
+
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
     | AgentRunCommand
     | EventSubscribeCommand
     | SessionCreateCommand
+    | SessionListCommand
+    | SessionResumeCommand
     | SessionSendMessageCommand
     | SessionGetHistoryCommand
     | SessionCloseCommand
     | PermissionRespondCommand
-    | SessionCompactCommand,
+    | SessionCompactCommand
+    | SubagentListCommand
+    | SubagentResultCommand
+    | SubagentSendInputCommand
+    | SubagentCloseCommand,
     Discriminator("type"),
 ]

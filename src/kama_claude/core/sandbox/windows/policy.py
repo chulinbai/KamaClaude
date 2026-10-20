@@ -35,9 +35,11 @@ def add_runtime_paths(policy: SandboxPolicy, cwd: Path, executable: Path) -> San
     reads = fs.read_roots
     if fs.include_platform_defaults:
         system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
-        # Drive roots let PowerShell initialize its drives; no blanket profile grant.
-        reads += (system_root, Path(system_root.anchor), Path(cwd.anchor),
-                  Path(sys.prefix), Path(sys.base_prefix), Path(sys.executable).parent)
+        # Read grants on volume roots expose unrelated files on current Windows builds.
+        # Even enumerate-only volume grants leak names outside approved directories.
+        # Explicit cwd and the runtime paths below are sufficient for PowerShell.
+        reads += (system_root, Path(sys.prefix), Path(sys.base_prefix),
+                  Path(sys.executable).parent)
     return replace(policy, file_system=replace(
         fs, read_roots=reads,
         protected_paths=fs.protected_paths + (executable.parent,),
@@ -52,8 +54,11 @@ def filesystem_config(policy: SandboxPolicy) -> dict[str, list[str]]:
             raise SandboxPolicyError(f"Write grant overlaps protected runtime/path: {write}")
         if any(write.is_relative_to(denied) for denied in fs.deny_paths):
             raise SandboxPolicyError(f"Write grant overlaps denied path: {write}")
+    # 公共策略中的读取授权可与同一路径的写入授权重合；MXC 的只读规则会拦截写入。
+    # 精确重复项由 readwritePaths 提供读写权限，显式保护目录仍必须保持只读。
+    reads = tuple(path for path in fs.read_roots if path not in fs.write_roots)
     return {
-        "readonlyPaths": list(dict.fromkeys(map(str, (*fs.read_roots, *fs.protected_paths)))),
+        "readonlyPaths": list(dict.fromkeys(map(str, (*reads, *fs.protected_paths)))),
         "readwritePaths": list(map(str, fs.write_roots)),
         "deniedPaths": list(map(str, fs.deny_paths)),
     }

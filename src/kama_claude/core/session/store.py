@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import shutil
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kama_claude.core.context import AgentContext
 from kama_claude.core.session.model import Session
 
 logger = logging.getLogger(__name__)
@@ -21,12 +25,25 @@ def _now() -> str:
 class SessionStore:
     # 初始化 session 文件存储根目录
     def __init__(self, root: Path) -> None:
-        self._root = root.expanduser()
+        self._root = root.expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
 
     # 返回指定 session 的目录路径
     def session_dir(self, sid: str) -> Path:
-        return self._root / sid
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", sid):
+            raise ValueError("Invalid session ID")
+        path = (self._root / sid).resolve()
+        if path.parent != self._root:
+            raise ValueError("Session directory is outside the session store")
+        return path
+
+    # 解析会话文件并拒绝指向会话目录之外的链接
+    def _file(self, sid: str, name: str) -> Path:
+        directory = self.session_dir(sid)
+        path = (directory / name).resolve()
+        if path.parent != directory:
+            raise ValueError("Session file is outside the session directory")
+        return path
 
     # 返回指定 session 下的 runs 目录路径
     def runs_dir(self, sid: str) -> Path:
@@ -36,15 +53,38 @@ class SessionStore:
     def write_meta(self, session: Session) -> None:
         path = self.session_dir(session.id)
         path.mkdir(parents=True, exist_ok=True)
-        (path / "meta.json").write_text(
-            json.dumps(session.to_dict(), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        target = self._file(session.id, "meta.json")
+        temporary = path / f".meta-{uuid.uuid4().hex}.tmp"
+        try:
+            temporary.write_text(
+                json.dumps(session.to_dict(), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     # 从 meta.json 读取 session meta
     def read_meta(self, sid: str) -> Session:
-        data = json.loads((self.session_dir(sid) / "meta.json").read_text(encoding="utf-8"))
-        return Session.from_dict(data)
+        data = json.loads(self._file(sid, "meta.json").read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Invalid session metadata")
+        session = Session.from_dict(data)
+        if session.id != sid:
+            raise ValueError("Session ID does not match its directory")
+        return session
+
+    # 扫描有效会话元数据并按最近更新时间排序，损坏记录只记录日志
+    def list_meta(self) -> list[Session]:
+        sessions = []
+        for path in self._root.iterdir():
+            if not path.is_dir():
+                continue
+            try:
+                sessions.append(self.read_meta(path.name))
+            except (OSError, ValueError, KeyError, TypeError):
+                logger.warning("skip invalid session metadata sid=%s", path.name)
+        return sorted(sessions, key=lambda s: (s.updated_at, s.id), reverse=True)
 
     # 追加一条 Anthropic API 消息到 thread.jsonl
     def append_message(
@@ -59,7 +99,7 @@ class SessionStore:
             row["run_id"] = run_id
         path = self.session_dir(sid)
         path.mkdir(parents=True, exist_ok=True)
-        with (path / "thread.jsonl").open("a", encoding="utf-8") as f:
+        with self._file(sid, "thread.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     # 批量追加一次 run 新产生的消息到 thread.jsonl
@@ -77,9 +117,24 @@ class SessionStore:
                 run_id=run_id,
             )
 
+    # 提交主 agent 的新增历史，失败后改用完整替换避免部分追加重复
+    def save_agent(self, agent: AgentContext, run_id: str) -> None:
+        try:
+            if agent.history_replaced:
+                self.write_compacted(agent.session_id, agent.messages)
+            else:
+                self.append_messages(
+                    agent.session_id, agent.messages[agent.persisted_count:], run_id,
+                )
+        except Exception:
+            agent.history_replaced = True
+            raise
+        agent.persisted_count = len(agent.messages)
+        agent.history_replaced = False
+
     # 读取完整 thread 并返回可直接传给 Anthropic 的 messages
     def read_messages(self, sid: str) -> list[dict[str, Any]]:
-        path = self.session_dir(sid) / "thread.jsonl"
+        path = self._file(sid, "thread.jsonl")
         if not path.exists():
             return []
 
@@ -91,6 +146,15 @@ class SessionStore:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 logger.warning("skip broken thread row sid=%s line=%s", sid, line_no)
+                continue
+            if not isinstance(row, dict):
+                logger.warning("skip invalid thread row sid=%s line=%s", sid, line_no)
+                continue
+            content = row.get("content", "")
+            if not isinstance(content, (str, list)) or (
+                isinstance(content, list) and not all(isinstance(b, dict) for b in content)
+            ):
+                logger.warning("skip invalid message content sid=%s line=%s", sid, line_no)
                 continue
             role = row.get("role")
             if role not in ("user", "assistant"):
@@ -131,19 +195,25 @@ class SessionStore:
 
     # 将压缩后的消息对覆盖写入 thread.jsonl，原文件备份为 thread_<ts>.jsonl.bak
     def write_compacted(self, sid: str, messages: list[dict[str, Any]]) -> None:
-        path = self.session_dir(sid) / "thread.jsonl"
-        ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        bak = self.session_dir(sid) / f"thread_{ts_str}.jsonl.bak"
-        if path.exists():
-            path.rename(bak)
-        with path.open("w", encoding="utf-8") as f:
-            for msg in messages:
-                row: dict[str, Any] = {"ts": _now(), "role": msg["role"], "content": msg["content"]}
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        path = self._file(sid, "thread.jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+        bak = self._file(sid, f"thread_{ts_str}.jsonl.bak")
+        temporary = path.parent / f".thread-{uuid.uuid4().hex}.tmp"
+        try:
+            with temporary.open("w", encoding="utf-8") as f:
+                for msg in messages:
+                    row = {"ts": _now(), "role": msg["role"], "content": msg["content"]}
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            if path.exists():
+                shutil.copyfile(path, bak)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     # 读取 notes.md 全文，文件不存在时返回空字符串
     def read_notes(self, sid: str) -> str:
-        path = self.session_dir(sid) / "notes.md"
+        path = self._file(sid, "notes.md")
         if not path.exists():
             return ""
         return path.read_text(encoding="utf-8")
@@ -152,5 +222,5 @@ class SessionStore:
     def append_note(self, sid: str, content: str, run_id: str) -> None:
         path = self.session_dir(sid)
         path.mkdir(parents=True, exist_ok=True)
-        with (path / "notes.md").open("a", encoding="utf-8") as f:
+        with self._file(sid, "notes.md").open("a", encoding="utf-8") as f:
             f.write(f"## Note ({_now()}, {run_id})\n{content}\n\n")

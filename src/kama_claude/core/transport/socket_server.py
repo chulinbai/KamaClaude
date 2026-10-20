@@ -51,6 +51,7 @@ class SocketServer:
         port: int,
         broadcaster: IpcEventBroadcaster | None = None,
         trace: TraceWriter | None = None,
+        on_disconnect: Callable[[asyncio.StreamWriter], Awaitable[None]] | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -58,6 +59,7 @@ class SocketServer:
         self._server: asyncio.AbstractServer | None = None
         self._broadcaster = broadcaster
         self._trace = trace
+        self._on_disconnect = on_disconnect
         self._active_writers: set[asyncio.StreamWriter] = set()
 
     # 注册一个方法名对应的命令处理函数
@@ -110,6 +112,11 @@ class SocketServer:
             await self._read_loop(reader, writer)
         finally:
             self._active_writers.discard(writer)
+            if self._on_disconnect is not None:
+                try:
+                    await self._on_disconnect(writer)
+                except Exception:
+                    logger.exception("Client disconnect cleanup failed: %s", peer)
             if self._broadcaster is not None:
                 self._broadcaster.unsubscribe(writer)
             try:

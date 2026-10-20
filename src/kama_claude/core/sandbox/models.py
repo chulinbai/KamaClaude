@@ -58,6 +58,7 @@ class SandboxExecRequest:
     timeout: float = 60.0
     output_limit: int = 64 * 1024
     path_locks: tuple[Path, ...] = ()
+    hardlink_audit_roots: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)

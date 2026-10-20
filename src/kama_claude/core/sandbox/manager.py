@@ -13,7 +13,7 @@ from .models import (
     SandboxType,
     WindowsSandboxConfig,
 )
-from .policy import clean_environment, normalize_path, normalize_policy
+from .policy import clean_environment, normalize_path, normalize_policy, protect_runtime
 
 
 class SandboxManager:
@@ -36,14 +36,7 @@ class SandboxManager:
             raise SandboxPolicyError(f"Sandbox cwd is not a directory: {cwd}")
         command = replace(command, cwd=cwd, env=clean_environment(command.env))
         # 防止可写工作区中的 editable 安装被命令改写后，在下一次辅助进程启动时执行
-        runtime_paths = (
-            Path(__file__).resolve().parents[2], Path(sys.prefix).resolve(),
-            Path(sys.base_prefix).resolve(), Path(sys.executable).resolve(),
-        )
-        policy = replace(policy, file_system=replace(
-            policy.file_system,
-            protected_paths=policy.file_system.protected_paths + runtime_paths,
-        ))
+        policy = protect_runtime(policy)
         if sys.platform == "win32":
             from .windows.command import build_command as build_windows_command
             from .windows.command import launcher_environment
@@ -51,6 +44,9 @@ class SandboxManager:
             from .windows.policy import add_runtime_paths
 
             executable = find_mxc(self.windows)
+            audit_roots = tuple(normalize_path(p, cwd) for p in (
+                *policy.file_system.read_roots, *policy.file_system.write_roots,
+            ))
             policy = normalize_policy(add_runtime_paths(policy, cwd, executable), cwd)
             return SandboxExecRequest(
                 build_windows_command(command, policy, executable), cwd,
@@ -59,6 +55,7 @@ class SandboxManager:
                 path_locks=(cwd, executable, *policy.file_system.read_roots,
                             *policy.file_system.write_roots, *policy.file_system.protected_paths,
                             *policy.file_system.deny_paths),
+                hardlink_audit_roots=audit_roots,
             )
         policy = normalize_policy(policy, cwd)
         if sys.platform == "linux":

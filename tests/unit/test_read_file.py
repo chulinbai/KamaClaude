@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from kama_claude.core.permissions.paths import PathAccessController
 from kama_claude.core.tools.builtin.read_file import ReadFileTool
 
 
@@ -12,7 +13,7 @@ from kama_claude.core.tools.builtin.read_file import ReadFileTool
 async def test_read_existing_file(tmp_path: Path) -> None:
     f = tmp_path / "hello.txt"
     f.write_text("hello world", encoding="utf-8")
-    result = await ReadFileTool().invoke({"path": str(f)})
+    result = await ReadFileTool(PathAccessController(tmp_path)).invoke({"path": str(f)})
     assert not result.is_error
     assert result.content == "hello world"
 
@@ -21,7 +22,7 @@ async def test_read_existing_file(tmp_path: Path) -> None:
 # 设计：传入不存在的路径，确认 ReadFileTool 不吞掉异常，让调用方（invoke_tool）负责错误分类和事件发布
 async def test_file_not_found_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
-        await ReadFileTool().invoke({"path": str(tmp_path / "missing.txt")})
+        await ReadFileTool(PathAccessController(tmp_path)).invoke({"path": str(tmp_path / "missing.txt")})
 
 
 # 功能：验证包含 `..` 的路径被拒绝并抛出 PermissionError
@@ -43,7 +44,7 @@ async def test_path_traversal_nested_raises() -> None:
 async def test_truncation_over_512kb(tmp_path: Path) -> None:
     f = tmp_path / "big.txt"
     f.write_bytes(b"x" * (600 * 1024))
-    result = await ReadFileTool().invoke({"path": str(f)})
+    result = await ReadFileTool(PathAccessController(tmp_path)).invoke({"path": str(f)})
     assert not result.is_error
     assert result.content.endswith("[truncated]")
     # Actual text content is exactly 512KB worth of 'x' chars
@@ -55,7 +56,7 @@ async def test_truncation_over_512kb(tmp_path: Path) -> None:
 async def test_exact_512kb_is_not_truncated(tmp_path: Path) -> None:
     f = tmp_path / "exact.txt"
     f.write_bytes(b"y" * (512 * 1024))
-    result = await ReadFileTool().invoke({"path": str(f)})
+    result = await ReadFileTool(PathAccessController(tmp_path)).invoke({"path": str(f)})
     assert not result.is_error
     assert not result.content.endswith("[truncated]")
     assert len(result.content) == 512 * 1024
@@ -66,6 +67,6 @@ async def test_exact_512kb_is_not_truncated(tmp_path: Path) -> None:
 async def test_empty_file_returns_empty_content(tmp_path: Path) -> None:
     f = tmp_path / "empty.txt"
     f.write_text("", encoding="utf-8")
-    result = await ReadFileTool().invoke({"path": str(f)})
+    result = await ReadFileTool(PathAccessController(tmp_path)).invoke({"path": str(f)})
     assert not result.is_error
     assert result.content == ""

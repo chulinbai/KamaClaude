@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from dataclasses import replace
 from pathlib import Path
 
 from .errors import SandboxPolicyError
-from .models import FileSystemPolicy, NetworkPolicy, SandboxPolicy
+from .models import FileSystemPolicy, NetworkPolicy, SandboxPolicy, WindowsSandboxConfig
 
 PROTECTED_NAMES = (".git", ".agents", ".codex", ".aws", ".kama")
 _SYSTEM_ALIASES = {Path("/tmp"), Path("/var"), Path("/etc")}
@@ -102,10 +103,42 @@ def normalize_policy(policy: SandboxPolicy, cwd: Path) -> SandboxPolicy:
     ))
 
 
-# 创建 Bash 的默认策略：全盘只读、当前工作区可写、网络禁止
+# 创建默认策略：当前工作区可读写，系统运行资源由各沙箱后端添加
 def workspace_policy(workspace: Path) -> SandboxPolicy:
     root = normalize_path(workspace, Path.cwd())
-    return SandboxPolicy(FileSystemPolicy(read_roots=(Path(root.anchor),), write_roots=(root,)))
+    return SandboxPolicy(FileSystemPolicy(read_roots=(root,), write_roots=(root,)))
+
+
+# 为原有策略补充宿主运行代码保护，文件工具和 Shell 使用相同禁止项
+def protect_runtime(policy: SandboxPolicy) -> SandboxPolicy:
+    runtime_paths = (
+        Path(__file__).resolve().parents[2], Path(sys.prefix).resolve(),
+        Path(sys.base_prefix).resolve(), Path(sys.executable).resolve(),
+    )
+    return replace(policy, file_system=replace(
+        policy.file_system, protected_paths=policy.file_system.protected_paths + runtime_paths,
+    ))
+
+
+# 把跨平台配置与兼容的 Windows 配置合并到现有文件系统策略
+def configured_policy(
+    workspace: Path, filesystem: FileSystemPolicy | None = None,
+    windows: WindowsSandboxConfig | None = None,
+) -> SandboxPolicy:
+    fs = filesystem or FileSystemPolicy(read_roots=())
+    policy = workspace_policy(workspace)
+    combined = replace(
+        fs, read_roots=policy.file_system.read_roots + fs.read_roots,
+        write_roots=policy.file_system.write_roots + fs.write_roots,
+    )
+    if sys.platform == "win32" and windows is not None:
+        combined = replace(
+            combined, read_roots=combined.read_roots + windows.readonly_paths,
+            write_roots=combined.write_roots + windows.readwrite_paths,
+            deny_paths=combined.deny_paths + windows.denied_paths,
+        )
+        policy = replace(policy, network=windows.network)
+    return protect_runtime(replace(policy, file_system=combined))
 
 
 # 合并调用方已经审批通过的额外授权，同时保留原有禁止项

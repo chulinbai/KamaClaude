@@ -31,19 +31,25 @@ def _setup_logging(level: str) -> None:
     root.addHandler(handler)
 
 
-# kama-tui 入口：解析 --replay 参数后启动 TUI 应用
+# kama-tui 入口：解析互斥的恢复与回放参数后启动 TUI 应用
 def main() -> None:
+    workspace = Path.cwd()
     parser = argparse.ArgumentParser(prog="kama-tui", description="KamaClaude TUI")
-    parser.add_argument(
+    history = parser.add_mutually_exclusive_group()
+    history.add_argument(
         "--replay",
         metavar="RUN_ID",
         help="Replay events from a past run on connect",
     )
+    history.add_argument("--resume", metavar="SESSION_ID", help="Resume an existing chat session")
     args = parser.parse_args()
 
     config = get_config()
     _setup_logging(config.logging.level)
-    app = KamaTuiApp(config.host, config.port, replay_run_id=args.replay)
+    app = KamaTuiApp(
+        config.host, config.port, replay_run_id=args.replay, resume_session_id=args.resume,
+        workspace=workspace,
+    )
     app.run()
 
 

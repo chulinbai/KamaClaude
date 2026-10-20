@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from kama_claude.core.permissions.paths import PathAccessController
 from kama_claude.core.tools.builtin.bash import BashTool
 from kama_claude.core.tools.builtin.list_dir import ListDirTool
 from kama_claude.core.tools.builtin.write_file import WriteFileTool
@@ -57,7 +58,7 @@ async def test_bash_stderr_merged() -> None:
 @pytest.mark.asyncio
 async def test_write_file_creates_and_returns_size(tmp_path: Path) -> None:
     target = tmp_path / "out.txt"
-    result = await WriteFileTool().invoke(
+    result = await WriteFileTool(PathAccessController(tmp_path)).invoke(
         {"path": str(target), "content": "hello world"}
     )
     assert not result.is_error
@@ -70,7 +71,7 @@ async def test_write_file_creates_and_returns_size(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_write_file_creates_parent_dirs(tmp_path: Path) -> None:
     target = tmp_path / "a" / "b" / "file.txt"
-    result = await WriteFileTool().invoke({"path": str(target), "content": "x"})
+    result = await WriteFileTool(PathAccessController(tmp_path)).invoke({"path": str(target), "content": "x"})
     assert not result.is_error
     assert target.exists()
 
@@ -91,7 +92,7 @@ async def test_write_file_rejects_traversal() -> None:
 async def test_list_dir_shows_files(tmp_path: Path) -> None:
     (tmp_path / "foo.py").write_text("x")
     (tmp_path / "bar.md").write_text("y")
-    result = await ListDirTool().invoke({"path": str(tmp_path)})
+    result = await ListDirTool(PathAccessController(tmp_path)).invoke({"path": str(tmp_path)})
     assert not result.is_error
     assert "foo.py" in result.content
     assert "bar.md" in result.content
@@ -107,7 +108,7 @@ async def test_list_dir_respects_max_depth(tmp_path: Path) -> None:
     grandchild.mkdir()
     (grandchild / "deep.txt").write_text("x")
 
-    result = await ListDirTool().invoke({"path": str(tmp_path), "max_depth": 1})
+    result = await ListDirTool(PathAccessController(tmp_path)).invoke({"path": str(tmp_path), "max_depth": 1})
     assert not result.is_error
     assert "child" in result.content
     assert "deep.txt" not in result.content
@@ -116,9 +117,9 @@ async def test_list_dir_respects_max_depth(tmp_path: Path) -> None:
 # 功能：验证对不存在的路径 list_dir 抛出 FileNotFoundError
 # 设计：直接传入不存在的路径字符串，预期抛出标准异常（invocation.py 捕获后返回 error ToolResult）
 @pytest.mark.asyncio
-async def test_list_dir_missing_path_raises() -> None:
+async def test_list_dir_missing_path_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
-        await ListDirTool().invoke({"path": "/this/does/not/exist"})
+        await ListDirTool(PathAccessController(tmp_path)).invoke({"path": "missing"})
 
 
 # 功能：验证 list_dir 拒绝包含 .. 的路径

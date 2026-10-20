@@ -32,6 +32,8 @@ def test_param_summary_prefers_key_fields() -> None:
 #       发送非 token 事件后新 block 被重置，下一个 token 开启新块
 def test_llm_tokens_accumulate_in_block() -> None:
     app = KamaTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"
+    app._session_run_ids.update({"r", "run-abc"})
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -56,6 +58,8 @@ def test_llm_block_finalize_renders_markdown() -> None:
 # 设计：插入 step.started 中断流，验证之前的 block 被 finalize，之后的 llm.token 创建新 LLMStreamBlock
 def test_llm_block_resets_after_non_token_event() -> None:
     app = KamaTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"
+    app._session_run_ids.update({"r", "run-abc"})
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -72,6 +76,8 @@ def test_llm_block_resets_after_non_token_event() -> None:
 # 设计：monkey-patch _append，断言追加的 widget 的 renderable 包含关键字段
 def test_run_started_appends_widget_with_content() -> None:
     app = KamaTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"
+    app._session_run_ids.update({"r", "run-abc"})
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -89,6 +95,8 @@ def test_run_started_appends_widget_with_content() -> None:
 # 设计：monkey-patch _append，检查 rendered 内容包含 completed 和 green
 def test_run_finished_success_shows_completed() -> None:
     app = KamaTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"
+    app._session_run_ids.update({"r", "run-abc"})
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -105,6 +113,8 @@ def test_run_finished_success_shows_completed() -> None:
 # 设计：与 success 对称，检查颜色标记差异
 def test_run_finished_failed_shows_red() -> None:
     app = KamaTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"
+    app._session_run_ids.update({"r", "run-abc"})
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -122,6 +132,8 @@ def test_run_finished_failed_shows_red() -> None:
 # 设计：直接调用 _handle_event 两次，通过 _pending_tool_blocks 验证状态流转
 def test_tool_call_started_and_finished() -> None:
     app = KamaTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"
+    app._session_run_ids.update({"r", "run-abc"})
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 
@@ -132,7 +144,7 @@ def test_tool_call_started_and_finished() -> None:
         "params": {"command": "echo hi"},
         "run_id": "r", "ts": "t",
     })
-    assert "uid-1" in app._pending_tool_blocks  # type: ignore[attr-defined]
+    assert ("r", "uid-1") in app._pending_tool_blocks
 
     app._handle_event({
         "type": "tool.call_finished",
@@ -142,7 +154,7 @@ def test_tool_call_started_and_finished() -> None:
         "output": "hi",
         "run_id": "r", "ts": "t",
     })
-    assert "uid-1" not in app._pending_tool_blocks  # type: ignore[attr-defined]
+    assert ("r", "uid-1") not in app._pending_tool_blocks
     block = appended[0]
     assert isinstance(block, ToolCallBlock)
     assert block._finished  # type: ignore[attr-defined]
@@ -177,6 +189,8 @@ async def test_input_submit_appends_user_turn_and_disables_prompt() -> None:
             return {"run_id": "run-1"}
 
     app = KamaTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"
+    app._session_run_ids.update({"r", "run-abc"})
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
     app._update_header = lambda state: None  # type: ignore[method-assign]
@@ -198,6 +212,8 @@ async def test_input_submit_appends_user_turn_and_disables_prompt() -> None:
 # 设计：发送 type 为 unknown 的事件，断言 appended 为空
 def test_unknown_event_silently_ignored() -> None:
     app = KamaTuiApp("127.0.0.1", 9999)
+    app._session_id = "sess-1"
+    app._session_run_ids.update({"r", "run-abc"})
     appended: list[Widget] = []
     app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
 

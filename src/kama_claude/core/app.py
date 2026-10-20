@@ -30,10 +30,22 @@ from kama_claude.core.bus.commands import (
     SessionCreateResult,
     SessionGetHistoryCommand,
     SessionGetHistoryResult,
+    SessionListCommand,
+    SessionListResult,
+    SessionResumeCommand,
+    SessionResumeResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
+    SessionSummary,
+    SubagentCloseCommand,
+    SubagentDataResult,
+    SubagentListCommand,
+    SubagentListResult,
+    SubagentResultCommand,
+    SubagentSendInputCommand,
 )
-from kama_claude.core.bus.envelope import EventPushEnvelope
+from kama_claude.core.bus.envelope import INVALID_PARAMS, EventPushEnvelope, HandlerError
+from kama_claude.core.bus.events import SessionClosedEvent
 from kama_claude.core.config import KamaConfig, get_config
 from kama_claude.core.events.bus import EventBus
 from kama_claude.core.llm.provider import AnthropicProvider
@@ -44,6 +56,7 @@ from kama_claude.core.permissions.storage import load_policy_file
 from kama_claude.core.runner import AgentRunner
 from kama_claude.core.runs import events_file, new_run_id
 from kama_claude.core.session import SessionManager, SessionStore
+from kama_claude.core.session.manager import SESSION_BUSY, SESSION_IN_USE
 from kama_claude.core.trace.record import TraceRecord
 from kama_claude.core.trace.writer import TraceWriter
 from kama_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
@@ -67,6 +80,51 @@ class CoreApp:
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
+        self._session_owners: dict[str, asyncio.StreamWriter] = {}
+        self._session_transition_lock = asyncio.Lock()
+        self._bus.subscribe(self._session_lifecycle)
+
+    # 记录创建会话的连接，以便断连清理审批和会话路径权限
+    def _own_session(self, session_id: str) -> None:
+        try:
+            writer = get_connection_writer()
+        except LookupError:
+            return  # 直接调用的单元测试或嵌入式使用没有 IPC 连接
+        self._session_owners[session_id] = writer
+        if writer.is_closing() and self._permission_manager is not None:
+            self._permission_manager.cancel_session(session_id)
+
+    # 校验会话由当前 IPC 连接持有，直接嵌入调用沿用无连接测试模式
+    def _require_session_owner(self, session_id: str) -> None:
+        try:
+            writer = get_connection_writer()
+        except LookupError:
+            return
+        if self._session_owners.get(session_id) is not writer:
+            raise HandlerError(SESSION_IN_USE, "session is not attached to this connection")
+
+    # 会话关闭事件统一清理一次性运行及显式关闭的授权
+    async def _session_lifecycle(self, event: BaseModel) -> None:
+        if isinstance(event, SessionClosedEvent):
+            self._session_owners.pop(event.session_id, None)
+            if self._permission_manager is not None:
+                self._permission_manager.cancel_session(event.session_id, "session_closed")
+
+    # 断连立即撤销授权；忙碌任务保持原生命周期但不能继续使用被撤销的权限
+    async def _client_disconnected(self, writer: asyncio.StreamWriter) -> None:
+        async with self._session_transition_lock:
+            sessions = [sid for sid, owner in self._session_owners.items() if owner is writer]
+            for sid in sessions:
+                self._session_owners.pop(sid, None)
+                if self._permission_manager is not None:
+                    self._permission_manager.cancel_session(sid)
+                if self._sessions is not None:
+                    try:
+                        await self._sessions.close(sid)
+                    except HandlerError:
+                        logger.info(
+                            "Disconnected session still busy; authorizations revoked: %s", sid,
+                        )
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -97,7 +155,11 @@ class CoreApp:
     async def _agent_run_handler(self, params: dict[str, Any]) -> AgentRunResult:
         assert self._sessions is not None
         cmd = AgentRunCommand.model_validate(params)
-        session = await self._sessions.create(mode="one_shot", title=cmd.goal[:40])
+        session = await self._sessions.create(
+            mode="one_shot", title=cmd.goal[:40],
+            workspace=Path(cmd.workspace) if cmd.workspace is not None else None,
+        )
+        self._own_session(session.id)
         run_id = new_run_id()
         run_task = asyncio.create_task(
             self._sessions.send_message(session.id, cmd.goal, run_id=run_id)
@@ -110,15 +172,88 @@ class CoreApp:
     async def _session_create_handler(self, params: dict[str, Any]) -> SessionCreateResult:
         assert self._sessions is not None
         cmd = SessionCreateCommand.model_validate(params)
-        session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
+        session = await self._sessions.create(
+            mode=cmd.mode, title=cmd.title,
+            workspace=Path(cmd.workspace) if cmd.workspace is not None else None,
+        )
+        self._own_session(session.id)
         return SessionCreateResult(session_id=session.id, status=session.status)
 
     # 向 session 发送一条用户消息并同步等待对应 run 完成
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
         assert self._sessions is not None
         cmd = SessionSendMessageCommand.model_validate(params)
-        run_id = await self._sessions.send_message(cmd.session_id, cmd.content)
+        async with self._session_transition_lock:
+            self._require_session_owner(cmd.session_id)
+        task = asyncio.current_task()
+        if task is not None:
+            self._running_runs.add(task)
+        try:
+            run_id = await self._sessions.send_message(cmd.session_id, cmd.content)
+        finally:
+            if task is not None:
+                self._running_runs.discard(task)
         return SessionSendMessageResult(run_id=run_id)
+
+    # 列出当前项目的聊天会话及相对于当前连接的占用状态
+    async def _session_list_handler(self, params: dict[str, Any]) -> SessionListResult:
+        assert self._sessions is not None
+        cmd = SessionListCommand.model_validate(params)
+        try:
+            writer = get_connection_writer()
+        except LookupError:
+            writer = None
+        return SessionListResult(sessions=[
+            SessionSummary(
+                session_id=s.id, title=s.title, updated_at=s.updated_at,
+                workspace=s.workspace, status=s.status, busy=self._sessions.is_busy(s.id),
+                attached_elsewhere=(
+                    s.id in self._session_owners and self._session_owners[s.id] is not writer
+                ),
+            ) for s in self._sessions.list_sessions(
+                workspace=Path(cmd.workspace) if cmd.workspace is not None else None,
+            )
+        ])
+
+    # 校验占用后恢复会话，在状态提交时同步转移连接和重置临时权限
+    async def _session_resume_handler(self, params: dict[str, Any]) -> SessionResumeResult:
+        assert self._sessions is not None
+        cmd = SessionResumeCommand.model_validate(params)
+        async with self._session_transition_lock:
+            try:
+                writer = get_connection_writer()
+            except LookupError:
+                writer = None
+            if writer is not None and writer.is_closing():
+                raise HandlerError(SESSION_BUSY, "connection is closing")
+            owner = self._session_owners.get(cmd.session_id)
+            if owner is not None and owner is not writer:
+                code = SESSION_BUSY if owner.is_closing() else SESSION_IN_USE
+                raise HandlerError(code, "session is attached to another connection")
+            if cmd.current_session_id:
+                self._require_session_owner(cmd.current_session_id)
+            already_owned = writer is not None and owner is writer
+
+            # 在会话事件发出前提交连接归属，防止异步广播期间出现半恢复状态
+            def attach() -> None:
+                if cmd.current_session_id and cmd.current_session_id != cmd.session_id:
+                    self._session_owners.pop(cmd.current_session_id, None)
+                    if self._permission_manager is not None:
+                        self._permission_manager.cancel_session(cmd.current_session_id)
+                if not already_owned and self._permission_manager is not None:
+                    self._permission_manager.reopen_session(cmd.session_id)
+                self._own_session(cmd.session_id)
+
+            session = await self._sessions.resume(
+                cmd.session_id,
+                cmd.current_session_id or (cmd.session_id if already_owned else None),
+                on_commit=attach,
+                workspace=Path(cmd.workspace) if cmd.workspace is not None else None,
+            )
+            return SessionResumeResult(
+                session_id=session.id, title=session.title,
+                workspace=session.workspace, status=session.status,
+            )
 
     # 返回 session 的完整 Anthropic messages 历史
     async def _session_history_handler(self, params: dict[str, Any]) -> SessionGetHistoryResult:
@@ -126,6 +261,52 @@ class CoreApp:
         cmd = SessionGetHistoryCommand.model_validate(params)
         messages = await self._sessions.get_history(cmd.session_id)
         return SessionGetHistoryResult(messages=messages)
+
+    # 列出当前连接所拥有会话中的全部 agent
+    async def _subagent_list_handler(self, params: dict[str, Any]) -> SubagentListResult:
+        assert self._sessions is not None
+        cmd = SubagentListCommand.model_validate(params)
+        async with self._session_transition_lock:
+            self._require_session_owner(cmd.session_id)
+            registry = self._sessions.agent_registry(cmd.session_id)
+            return SubagentListResult(agents=registry.result()["agents"])
+
+    # 查询指定身份或历史执行并返回明确的过期错误
+    async def _subagent_result_handler(self, params: dict[str, Any]) -> SubagentDataResult:
+        assert self._sessions is not None
+        cmd = SubagentResultCommand.model_validate(params)
+        async with self._session_transition_lock:
+            self._require_session_owner(cmd.session_id)
+            registry = self._sessions.agent_registry(cmd.session_id)
+            try:
+                return SubagentDataResult(data=registry.result(cmd.agent_id, cmd.run_id))
+            except ValueError as exc:
+                raise HandlerError(INVALID_PARAMS, str(exc)) from exc
+
+    # 用户通过管理界面投递协作消息，身份由服务端固定为 user
+    async def _subagent_send_handler(self, params: dict[str, Any]) -> SubagentDataResult:
+        assert self._sessions is not None
+        cmd = SubagentSendInputCommand.model_validate(params)
+        async with self._session_transition_lock:
+            self._require_session_owner(cmd.session_id)
+            registry = self._sessions.agent_registry(cmd.session_id)
+        try:
+            data = await registry.send("user", cmd.agent_id, cmd.message, cmd.wake)
+            return SubagentDataResult(data=data)
+        except ValueError as exc:
+            raise HandlerError(INVALID_PARAMS, str(exc)) from exc
+
+    # 用户关闭子树时在状态校验后释放会话转换锁
+    async def _subagent_close_handler(self, params: dict[str, Any]) -> SubagentDataResult:
+        assert self._sessions is not None
+        cmd = SubagentCloseCommand.model_validate(params)
+        async with self._session_transition_lock:
+            self._require_session_owner(cmd.session_id)
+            registry = self._sessions.agent_registry(cmd.session_id)
+        try:
+            return SubagentDataResult(data=await registry.close("main", cmd.agent_id))
+        except ValueError as exc:
+            raise HandlerError(INVALID_PARAMS, str(exc)) from exc
 
     # 接收客户端权限审批响应，resolve 对应挂起的 Future
     async def _permission_respond_handler(self, params: dict[str, Any]) -> PermissionRespondResult:
@@ -136,14 +317,22 @@ class CoreApp:
         )
         if self._permission_manager is None:
             logger.error("permission.respond: PermissionManager not initialized")
-            return PermissionRespondResult()
-        self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
-        return PermissionRespondResult()
+            return PermissionRespondResult(ok=False)
+        if cmd.request_id:
+            sid = self._permission_manager.request_session(cmd.request_id)
+            owner = self._session_owners.get(sid or "")
+            if owner is not None and get_connection_writer() is not owner:
+                return PermissionRespondResult(ok=False)
+        return PermissionRespondResult(ok=self._permission_manager.respond(
+            cmd.tool_use_id, cmd.decision, cmd.request_id, session_id=cmd.session_id,
+        ))
 
     # 手动压缩 session thread，将摘要持久化写入 thread.jsonl
     async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
         assert self._sessions is not None
         cmd = SessionCompactCommand.model_validate(params)
+        async with self._session_transition_lock:
+            self._require_session_owner(cmd.session_id)
         result = await self._sessions.compact(cmd.session_id, cmd.focus)
         return result  # type: ignore[no-any-return]
 
@@ -151,7 +340,11 @@ class CoreApp:
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
         assert self._sessions is not None
         cmd = SessionCloseCommand.model_validate(params)
-        await self._sessions.close(cmd.session_id)
+        async with self._session_transition_lock:
+            self._require_session_owner(cmd.session_id)
+            await self._sessions.close(cmd.session_id)
+            if self._permission_manager is not None:
+                self._permission_manager.cancel_session(cmd.session_id, "session_closed")
         return SessionCloseResult(status="closed")
 
     # 注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
@@ -258,16 +451,23 @@ class CoreApp:
             self._config.port,
             self._broadcaster,
             trace=self._trace,
+            on_disconnect=self._client_disconnected,
         )
         server.register("core.ping", self._ping_handler)
         server.register("agent.run", self._agent_run_handler)
         server.register("event.subscribe", self._subscribe_handler)
         server.register("session.create", self._session_create_handler)
+        server.register("session.list", self._session_list_handler)
+        server.register("session.resume", self._session_resume_handler)
         server.register("session.send_message", self._session_send_handler)
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)
+        server.register("subagent.list", self._subagent_list_handler)
+        server.register("subagent.result", self._subagent_result_handler)
+        server.register("subagent.send_input", self._subagent_send_handler)
+        server.register("subagent.close", self._subagent_close_handler)
 
         addr = await server.start()
         logger.info("kama-core %s listening addr=%s", kama_claude.__version__, addr)
@@ -287,12 +487,20 @@ class CoreApp:
         finally:
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
+            await self._shutdown(server)
 
+    # 先停止接收并收回所有主子执行，再关闭共享连接与服务
+    async def _shutdown(self, server: SocketServer) -> None:
         logger.info("shutting down")
-        for run_task in list(self._running_runs):
+        if self._sessions is not None:
+            self._sessions.stop_accepting()
+        runs = list(self._running_runs)
+        for run_task in runs:
             run_task.cancel()
-        if self._running_runs:
-            await asyncio.gather(*self._running_runs, return_exceptions=True)
+        if runs:
+            await asyncio.gather(*runs, return_exceptions=True)
+        if self._sessions is not None:
+            await self._sessions.shutdown()
         if self._mcp_manager is not None:
             await self._mcp_manager.stop_all()
         await server.stop()

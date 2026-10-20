@@ -1,4 +1,5 @@
 from kama_claude.core.tools.builtin.bash import BashTool
+from kama_claude.core.tools.builtin.create_dir import CreateDirTool
 from kama_claude.core.tools.builtin.list_dir import ListDirTool
 from kama_claude.core.tools.builtin.note_save import NoteSaveTool
 from kama_claude.core.tools.builtin.read_file import ReadFileTool
@@ -10,6 +11,7 @@ from kama_claude.core.tools.builtin.write_file import WriteFileTool
 
 __all__ = [
     "BashTool",
+    "CreateDirTool",
     "ListDirTool",
     "NoteSaveTool",
     "ReadFileTool",

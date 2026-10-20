@@ -24,6 +24,8 @@ def build_bwrap_args(
         args += ["--ro-bind", "/", "/"]
     else:
         args += ["--tmpfs", "/"]
+    args += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+    if Path("/") not in fs.read_roots:
         roots = set(fs.read_roots + fs.write_roots + runtime_roots)
         if fs.include_platform_defaults:
             roots.update(Path(p) for p in PLATFORM_READ_ROOTS if Path(p).exists())
@@ -33,7 +35,6 @@ def build_bwrap_args(
             args += ["--ro-bind", pin(target), str(target)]
             if target != root:
                 args += ["--symlink", str(target), str(root)]
-    args += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
     for root in fs.write_roots:
         args += ["--bind", pin(root), str(root)]
     for root in fs.protected_paths:

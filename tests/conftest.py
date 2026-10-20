@@ -51,6 +51,9 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     env["KAMA_PORT"] = str(free_port)
     env["KAMA_LOG_FILE"] = ""
     env["KAMA_LOG_LEVEL"] = "WARNING"
+    # IPC 测试只验证本机协议，使用虚拟凭据与关闭的本机端口避免真实 LLM 调用。
+    env["ANTHROPIC_API_KEY"] = "local-test-key"
+    env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:1"
 
     proc = subprocess.Popen([sys.executable, "-m", "kama_claude.core"], env=env)
 

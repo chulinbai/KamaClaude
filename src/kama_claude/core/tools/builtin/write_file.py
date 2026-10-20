@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from kama_claude.core.permissions.paths import PathAccessController
 from kama_claude.core.tools.base import BaseTool, ToolResult
 
 _MAX_BYTES = 1 * 1024 * 1024  # 1 MB
@@ -16,12 +17,15 @@ class WriteFileParams(BaseModel):
 
 
 class WriteFileTool(BaseTool):
+    path_access: PathAccessController
     params_model = WriteFileParams
     name = "write_file"
     description = (
-        "Write text content to a file, creating it (and any parent directories) if it "
+        "Write text content to a file, creating it if it "
         "does not exist, or overwriting it if it does. "
-        "Path must be relative to the current working directory. "
+        "Accepts relative or absolute paths; external paths need user approval. "
+        "Missing parents may only be created within an allowed directory; "
+        "otherwise use create_dir. "
         "Content size is limited to 1 MB."
     )
     input_schema: dict[str, object] = {
@@ -29,7 +33,7 @@ class WriteFileTool(BaseTool):
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Relative path to the file (relative to current working directory).",
+                "description": "File path, relative to the workspace or absolute.",
             },
             "content": {
                 "type": "string",
@@ -39,14 +43,15 @@ class WriteFileTool(BaseTool):
         "required": ["path", "content"],
     }
 
-    # 写入文件内容；超 1MB 拒绝；禁止 .. 路径遍历；自动创建父目录
+    # 注入统一文件系统权限，直接调用也不能绕过路径边界
+    def __init__(self, access: PathAccessController | None = None) -> None:
+        self.path_access = access or PathAccessController()
+
+    # 写入获准文件，父目录只在已授权范围内创建
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = WriteFileParams.model_validate(params)
         path_str = p.path
         content = p.content
-
-        if ".." in Path(path_str).parts:
-            raise PermissionError(f"path traversal not allowed: {path_str}")
 
         encoded = content.encode("utf-8")
         if len(encoded) > _MAX_BYTES:
@@ -57,7 +62,6 @@ class WriteFileTool(BaseTool):
             )
 
         path = Path(path_str)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        self.path_access.write(path, encoded)
 
         return ToolResult(content=f"wrote {len(encoded)} bytes to {path_str}")

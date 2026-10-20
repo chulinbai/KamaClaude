@@ -18,6 +18,9 @@ class AgentProfile:
 class AgentProfileLoader:
     _BUILTIN_DIR = Path(__file__).parent / "builtin"
 
+    def __init__(self, workspace: Path | None = None) -> None:
+        self._workspace = workspace if workspace is not None else Path.cwd()
+
     # 查找指定角色配置；未找到返回 None
     def load(self, name: str) -> AgentProfile | None:
         for path in self._search_paths(name):
@@ -32,7 +35,7 @@ class AgentProfileLoader:
     def _search_paths(self, name: str) -> list[Path]:
         builtin = self._BUILTIN_DIR / f"{name}.toml"
         global_ = Path("~/.kama/agents").expanduser() / f"{name}.toml"
-        local = Path(".kama/agents") / f"{name}.toml"
+        local = self._workspace / ".kama/agents" / f"{name}.toml"
         return [local, global_, builtin]
 
     # 解析 TOML 角色配置文件

@@ -17,6 +17,8 @@ from kama_claude.core.bus.events import (
 )
 from kama_claude.core.events.bus import EventBus
 from kama_claude.core.llm.types import ToolCallBlock
+from kama_claude.core.permissions.paths import PathAccessError, PathGrant, path_execution
+from kama_claude.core.sandbox.errors import SandboxError
 from kama_claude.core.tools.base import ToolResult
 from kama_claude.core.tools.errors import RateLimitedError
 from kama_claude.core.tools.registry import ToolRegistry
@@ -102,23 +104,53 @@ async def invoke_tool(
                 "schema_error", str(exc), elapsed(),
             )
 
+    access = tool.path_access
+    grants: tuple[PathGrant, ...] = ()
+    needed: tuple[PathGrant, ...] = ()
+    try:
+        if access is not None:
+            if permission_manager is not None:
+                grants = permission_manager.session_grants(session_id, str(access.cwd))
+            requests = access.requirements(tool_call.name, dict(tool_call.input))
+            needed = tuple(r for r in requests if not access.allows(r, grants))
+            if needed and permission_manager is None:
+                raise PathAccessError(f"Path approval required: {needed[0].path}")
+    except (PathAccessError, SandboxError) as exc:
+        code = exc.code if isinstance(exc, PathAccessError) else exc.error_type
+        return await _fail(bus, run_id, tool_call, code, str(exc), elapsed())
+
+    request_id: str | None = None
     if permission_manager is not None:
+        # 保留服务器请求标识，使结果事件与审批块精确对应
         async def _emit_permission(raw: dict[str, Any]) -> None:
+            nonlocal request_id
+            request_id = raw.get("request_id")
             await bus.publish(PermissionRequestedEvent(**raw, run_id=run_id))
 
-        allowed, decision = await permission_manager.check_and_wait(
-            tool_use_id=tool_call.id,
-            tool_name=tool_call.name,
-            params=dict(tool_call.input),
-            session_id=session_id,
-            event_emitter=_emit_permission,
-        )
+        try:
+            allowed, decision = await permission_manager.check_and_wait(
+                tool_use_id=tool_call.id,
+                tool_name=tool_call.name,
+                params=dict(tool_call.input),
+                session_id=session_id,
+                event_emitter=_emit_permission,
+                paths=needed,
+                workspace=str(access.cwd) if access else "",
+            )
+        except asyncio.CancelledError:
+            if request_id is not None:
+                await bus.publish(PermissionDeniedEvent(
+                    run_id=run_id, tool_use_id=tool_call.id, request_id=request_id,
+                    decision="cancelled", ts=_now(),
+                ))
+            raise
         if allowed:
             if decision not in ("auto_allow",):
                 await bus.publish(
                     PermissionGrantedEvent(
                         run_id=run_id,
                         tool_use_id=tool_call.id,
+                        request_id=request_id,
                         decision=decision,
                         ts=_now(),
                     )
@@ -129,6 +161,7 @@ async def invoke_tool(
                     PermissionDeniedEvent(
                         run_id=run_id,
                         tool_use_id=tool_call.id,
+                        request_id=request_id,
                         decision=decision,
                         ts=_now(),
                     )
@@ -141,14 +174,28 @@ async def invoke_tool(
                 elapsed(),
             )
 
+    grants = (*grants, *needed)
+
+    # 为执行创建独立权限快照，避免并发调用与子 agent 泄漏单次授权
+    async def execute() -> ToolResult:
+        if permission_manager is not None and permission_manager.is_closed(session_id):
+            raise PathAccessError("Session closed; path authorization has been revoked")
+        if access is None:
+            return await tool.invoke(dict(tool_call.input))
+        with path_execution(access, grants):
+            return await tool.invoke(dict(tool_call.input))
+
     for attempt in range(1, _MAX_RETRIES + 2):
         error_class: str | None = None
         error_message: str | None = None
 
         try:
-            result = await asyncio.wait_for(
-                tool.invoke(dict(tool_call.input)), timeout=timeout + tool.execution_overhead_s
-            )
+            if tool.managed_timeout:
+                result = await execute()
+            else:
+                result = await asyncio.wait_for(
+                    execute(), timeout=timeout + tool.execution_overhead_s
+                )
             ms = elapsed()
 
             if result.is_error:
@@ -170,6 +217,9 @@ async def invoke_tool(
         except RateLimitedError as exc:
             error_class = "rate_limited"
             error_message = str(exc)
+        except (PathAccessError, SandboxError) as exc:
+            error_class = exc.code if isinstance(exc, PathAccessError) else exc.error_type
+            error_message = str(exc)
         except TimeoutError:
             return await _fail(
                 bus, run_id, tool_call,
@@ -177,6 +227,9 @@ async def invoke_tool(
                 elapsed(),
                 attempt=attempt,
             )
+        except OSError as exc:
+            error_class = "permission_denied" if isinstance(exc, PermissionError) else "file_error"
+            error_message = str(exc)
         except Exception as exc:
             error_class = "runtime_error"
             error_message = str(exc)
@@ -184,7 +237,7 @@ async def invoke_tool(
         assert error_class is not None and error_message is not None
         ms = elapsed()
 
-        if error_class in _RETRYABLE and attempt <= _MAX_RETRIES:
+        if tool.retry_errors and error_class in _RETRYABLE and attempt <= _MAX_RETRIES:
             await bus.publish(
                 ToolCallFailedEvent(
                     run_id=run_id,

@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from kama_claude.core.config import KamaConfig
@@ -64,6 +65,7 @@ class StdoutPrinter:
 
 # 异步核心：连接 daemon，订阅事件，触发 run，等待 run.finished
 async def _run_async(goal: str, config: KamaConfig) -> int:
+    workspace = Path.cwd()
     client = SocketClient(config.host, config.port)
     try:
         await client.connect()
@@ -94,7 +96,7 @@ async def _run_async(goal: str, config: KamaConfig) -> int:
                 "scope": "global",
             },
         )
-        await client.send_command("agent.run", {"goal": goal})
+        await client.send_command("agent.run", {"goal": goal, "workspace": str(workspace)})
     except IpcError as e:
         print(f"error: {e}", file=sys.stderr)
         loop_task.cancel()

@@ -44,6 +44,46 @@ async def execute(
         return await spawn(SandboxManager().prepare(command, prepared))
 
 
+# Core 与 TUI 项目不同：真实 MXC 命令从会话目录启动，相对写入落在项目且 Core 路径未获写权限。
+async def test_session_workspace_drives_native_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
+    from kama_claude.core.config import KamaConfig
+    from kama_claude.core.events.bus import EventBus
+    from kama_claude.core.runner import AgentRunner
+    from kama_claude.core.session import SessionManager, SessionStore
+    from kama_claude.core.task.manager import TaskManager
+
+    core, project = tmp_path / "core", tmp_path / "client project 中文"
+    core.mkdir()
+    project.mkdir()
+    monkeypatch.chdir(core)
+    runner = AgentRunner(KamaConfig(), provider=Mock())
+    manager = SessionManager(SessionStore(tmp_path / "sessions"), lambda: runner, EventBus())
+    session = await manager.create("chat", workspace=project)
+    registry = runner._build_registry(TaskManager(tmp_path / "tasks"), session=session)
+    bash = registry.get("bash")
+    assert isinstance(bash, BashTool)
+    forbidden = core / "should-not-exist.txt"
+    result = await bash.invoke({"command": (
+        "$ErrorActionPreference='Stop'; "
+        "[IO.File]::WriteAllText('relative.txt','session cwd'); "
+        "$blocked=$false; "
+        f"try {{ [IO.File]::WriteAllText({ps_string(forbidden)},'bad') }} "
+        "catch { $blocked=$true }; "
+        "@{ cwd=$PWD.Path; native=[Environment]::CurrentDirectory; blocked=$blocked } "
+        "| ConvertTo-Json -Compress"
+    )})
+    assert not result.is_error, result.content
+    assert json.loads(result.content) == {"cwd": str(project), "native": str(project), "blocked": True}
+    assert (project / "relative.txt").read_text() == "session cwd"
+    assert not (core / "relative.txt").exists()
+    assert not forbidden.exists()
+    assert Path.cwd() == core
+
+
 @pytest.mark.asyncio
 async def test_pipes_unicode_exit_and_stdin_eof(tmp_path: Path) -> None:
     result = await execute(tmp_path, "[Console]::WriteLine('中文 stdout'); "

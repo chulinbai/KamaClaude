@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kama_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
+from kama_claude.core.bus.events import (
+    RunFinishedEvent,
+    RunStartedEvent,
+    SubagentFinishedEvent,
+    SubagentStartedEvent,
+)
 from kama_claude.core.compact.compactor import Compactor
 from kama_claude.core.config import KamaConfig
 from kama_claude.core.context import ExecutionContext
@@ -18,14 +23,23 @@ from kama_claude.core.loop import AgentLoop
 from kama_claude.core.mcp.server import McpServerManager
 from kama_claude.core.memory.loader import load_context_file
 from kama_claude.core.permissions.manager import PermissionManager
+from kama_claude.core.permissions.paths import PathAccessController
 from kama_claude.core.runs import RUNS_DIR, new_run_id
+from kama_claude.core.sandbox.policy import configured_policy
 from kama_claude.core.session.model import Session
 from kama_claude.core.session.store import SessionStore
-from kama_claude.core.subagent.registry import BackgroundTaskRegistry
-from kama_claude.core.subagent.tool import AgentResultTool, SpawnAgentTool
+from kama_claude.core.subagent.registry import AgentRegistry
+from kama_claude.core.subagent.tool import (
+    AgentResultTool,
+    CloseAgentTool,
+    SendInputTool,
+    SpawnAgentTool,
+    WaitAgentTool,
+)
 from kama_claude.core.task.manager import TaskManager
 from kama_claude.core.tools.builtin import (
     BashTool,
+    CreateDirTool,
     ListDirTool,
     NoteSaveTool,
     ReadFileTool,
@@ -40,6 +54,7 @@ from kama_claude.core.trace.provider import TracingProvider
 from kama_claude.core.trace.writer import TraceWriter
 
 
+# 返回当前 UTC 时间
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -52,7 +67,7 @@ class RunOutcome:
 
 
 class AgentRunner:
-    # 组装所有运行时依赖，准备执行一次完整的 agent run
+    # 组装共用执行服务，运行注册表由所属 Session 注入
     def __init__(
         self,
         config: KamaConfig,
@@ -66,17 +81,25 @@ class AgentRunner:
         mcp_manager: McpServerManager | None = None,
     ) -> None:
         self._config = config
-        self._bus = bus
+        self._bus = bus or EventBus()
         self._provider = provider
-        self._extra_handlers: list[EventHandler] = extra_handlers or []
+        self._extra_handlers = extra_handlers or []
         self._runs_dir = runs_dir or RUNS_DIR
         self._trace = trace
         self._permission_manager = permission_manager
         self._mcp_manager = mcp_manager
-        # 跨 run 共享的后台 subagent 任务注册表
-        self._task_registry = BackgroundTaskRegistry()
+        self._task_registry = AgentRegistry(bus=self._bus)
 
-    # 构建工具注册表，注入 TaskManager（任务工具共享同一实例）；可选注入 SpawnAgentTool
+    @property
+    # 返回唯一运行表供旧调用方检查后台任务
+    def background_tasks(self) -> AgentRegistry:
+        return self._task_registry
+
+    # 接入会话持有的注册表，保证下一轮仍能找到已有 agent
+    def bind_registry(self, registry: AgentRegistry) -> None:
+        self._task_registry = registry
+
+    # 构建每轮工具实例，统一根与子 agent 的工具和 MCP 接入
     def _build_registry(
         self,
         task_manager: TaskManager,
@@ -89,59 +112,91 @@ class AgentRunner:
         child_runs_dir: Path | None = None,
         session_id: str = "",
         tool_whitelist: list[str] | None = None,
+        context: ExecutionContext | None = None,
+        workspace: Path | None = None,
+        access: PathAccessController | None = None,
     ) -> ToolRegistry:
-        allowed: set[str] | None = set(tool_whitelist) if tool_whitelist else None
+        allowed = set(tool_whitelist) if tool_whitelist else None
 
-        def _ok(name: str) -> bool:
+        # 角色白名单控制实际注册的工具，而不仅是模型可见的 schema
+        def permitted(name: str) -> bool:
             return allowed is None or name in allowed
 
+        workspace = workspace or (
+            Path(session.workspace) if session and session.workspace else Path.cwd()
+        )
+        access = access or PathAccessController(
+            cwd=workspace,
+            policy=configured_policy(
+                workspace,
+                self._config.sandbox.filesystem,
+                self._config.sandbox.windows,
+            ),
+        )
         registry = ToolRegistry()
-        for t in [ReadFileTool(), BashTool(windows=self._config.sandbox.windows),
-                  WriteFileTool(), ListDirTool()]:
-            if _ok(t.name):
-                registry.register(t)
-        for t in [
+        tools = [
+            ReadFileTool(access),
+            BashTool(windows=self._config.sandbox.windows, access=access),
+            WriteFileTool(access),
+            ListDirTool(access),
+            CreateDirTool(access),
             TaskCreateTool(task_manager),
             TaskUpdateTool(task_manager),
             TaskListTool(task_manager),
             TaskGetTool(task_manager),
-        ]:
-            if _ok(t.name):
-                registry.register(t)
+        ]
+        for tool in tools:
+            if permitted(tool.name):
+                registry.register(tool)
         if session is not None and store is not None and run_id is not None:
-            note_tool = NoteSaveTool(store, session.id, run_id)
-            if _ok(note_tool.name):
-                registry.register(note_tool)
+            if permitted("note_save"):
+                registry.register(NoteSaveTool(store, session.id, run_id))
         if provider is not None and bus is not None and run_id is not None:
             runs_dir = child_runs_dir or self._runs_dir
-            if _ok("spawn_agent"):
-                registry.register(
-                    SpawnAgentTool(
-                        provider=provider,
-                        parent_bus=bus,
-                        parent_run_id=run_id,
-                        permission_manager=self._permission_manager,
-                        max_steps=self._config.agent.max_steps,
-                        task_registry=self._task_registry,
-                        runs_dir=runs_dir,
-                        session_id=session_id,
-                        depth=0,
-                        windows_sandbox=self._config.sandbox.windows,
-                    )
-                )
-            if _ok("agent_result"):
-                registry.register(AgentResultTool(self._task_registry))
+            caller = context.agent_context.agent_id if context else "main"
+            runtime = self._task_registry.agents.get(caller)
+
+            # 子执行捕获工作目录与服务，但不捕获父运行的局部事件总线
+            async def execute_child(child: ExecutionContext) -> None:
+                await self.run_context(child, workspace=workspace, runs_dir=runs_dir, access=access)
+
+            coordination = [
+                SpawnAgentTool(
+                    provider,
+                    self._bus,
+                    run_id,
+                    self._permission_manager,
+                    self._config.agent.max_steps,
+                    self._task_registry,
+                    runs_dir,
+                    session_id,
+                    depth=runtime.depth if runtime else 0,
+                    filesystem_access=access,
+                    caller=caller,
+                    execute=execute_child,
+                ),
+                AgentResultTool(self._task_registry),
+                SendInputTool(self._task_registry, caller),
+                WaitAgentTool(self._task_registry, caller),
+                CloseAgentTool(self._task_registry, caller),
+            ]
+            for tool in coordination:
+                if permitted(tool.name):
+                    registry.register(tool)
         if self._mcp_manager is not None:
-            for mcp_tool in self._mcp_manager.get_tools():
-                if _ok(mcp_tool.name):
-                    registry.register(mcp_tool)
+            for tool in self._mcp_manager.get_tools():
+                if permitted(tool.name):
+                    registry.register(tool)
         return registry
 
-    # 执行一次完整的 agent run（委托给 run_and_capture，忽略返回值）
+    # 独立 one-shot 入口结束时也清理后台子任务
     async def run(self, goal: str, *, run_id: str | None = None) -> None:
-        await self.run_and_capture(goal, run_id=run_id)
+        try:
+            await self.run_and_capture(goal, run_id=run_id)
+        finally:
+            await self._task_registry.shutdown()
 
-    # 执行 agent run 并返回 RunOutcome（含最终文字结果）
+    # 普通会话适配层，保持 Session 存储与单轮配置接口
     async def run_and_capture(
         self,
         goal: str,
@@ -153,112 +208,165 @@ class AgentRunner:
         tool_whitelist: list[str] | None = None,
     ) -> RunOutcome:
         run_id = run_id or new_run_id()
-        if session is not None and store is not None:
-            run_path = store.runs_dir(session.id) / run_id
-            history = store.read_messages(session.id)
-            notes = store.read_notes(session.id)
+        sid = session.id if session else ""
+        self._task_registry.session_id = sid
+        if "main" not in self._task_registry.agents:
+            history = (
+                store.read_messages(sid)
+                if store and session
+                else [{"role": "user", "content": goal}]
+            )
+            runtime = self._task_registry.ensure_main(history)
         else:
-            run_path = self._runs_dir / run_id
-            history = [{"role": "user", "content": goal}]
-            notes = ""
-        run_path.mkdir(parents=True, exist_ok=True)
-
-        global_ctx = load_context_file(Path("~/.kama/context.md").expanduser())
-        project_ctx = load_context_file(Path(".kama/context.md"))
-
-        task_manager = TaskManager(run_path / ".tasks")
-
-        bus = self._bus if self._bus is not None else EventBus()
-        for h in self._extra_handlers:
-            bus.subscribe(h)
-
+            runtime = self._task_registry.agents["main"]
+            if session is None:
+                runtime.context.messages.append({"role": "user", "content": goal})
         context = ExecutionContext(
-            run_id=run_id,
-            goal=goal,
-            max_steps=self._config.agent.max_steps,
-            prefill_messages=history,
-            session_notes=notes,
-            global_context=global_ctx,
-            project_context=project_ctx,
+            run_id,
+            goal,
+            self._config.agent.max_steps,
+            agent_context=runtime.context,
+            registry=self._task_registry,
             system_prompt_override=system_prompt_override,
+            session_notes=store.read_notes(sid) if store and session else "",
         )
-        prefill_len = len(history)
+        try:
+            await self._task_registry.begin_main(context)
+            await self.run_context(
+                context,
+                workspace=Path(session.workspace) if session and session.workspace else Path.cwd(),
+                runs_dir=store.runs_dir(sid) if store and session else self._runs_dir,
+                session=session,
+                store=store,
+                tool_whitelist=tool_whitelist,
+            )
+        finally:
+            record = self._task_registry.runs.get(context.run_id)
+            if record is not None and record.context is context:
+                if context.status == "running":
+                    context.mark_failed("cancelled")
+                await self._task_registry.finish(context)
+        return RunOutcome(context.status, context.result, context.reason)
 
+    # 共用执行内核，仅通过可选能力接入主会话的笔记和持久化
+    async def run_context(
+        self,
+        context: ExecutionContext,
+        *,
+        workspace: Path,
+        runs_dir: Path,
+        session: Session | None = None,
+        store: SessionStore | None = None,
+        tool_whitelist: list[str] | None = None,
+        access: PathAccessController | None = None,
+        parent_run_id: str | None = None,
+    ) -> None:
+        agent = context.agent_context
+        run_path = runs_dir / context.run_id
+        runtime = self._task_registry.agents[agent.agent_id]
+        bus = EventBus(
+            session_id=agent.session_id,
+            agent_id=agent.agent_id,
+            parent_agent_id=agent.parent_agent_id,
+        )
+        context.global_context = load_context_file(Path("~/.kama/context.md").expanduser())
+        context.project_context = load_context_file(workspace / ".kama/context.md")
+        if agent.profile is not None:
+            tool_whitelist = agent.profile.allowed_tools or None
+        if agent.parent_agent_id:
+            parent = self._task_registry.agents[agent.parent_agent_id]
+            parent_run_id = parent_run_id or parent.latest_run_id or ""
+        cancelled = False
+        persistence_error: Exception | None = None
         async with EventWriter(run_path / "events.jsonl") as writer:
             writer.subscribe(bus)
-            await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
-
-            cancelled = False
+            bus.subscribe(self._bus.publish)
+            for handler in self._extra_handlers:
+                bus.subscribe(handler)
+            await bus.publish(RunStartedEvent(run_id=context.run_id, goal=context.goal, ts=_now()))
             try:
-                provider: LLMProvider = self._provider or AnthropicProvider(
-                    self._config.llm.default_model
-                )
+                if agent.parent_agent_id:
+                    await bus.publish(
+                        SubagentStartedEvent(
+                            run_id=context.run_id,
+                            parent_run_id=parent_run_id or "",
+                            description=agent.description,
+                            ts=_now(),
+                        )
+                    )
+                if self._provider is None:
+                    self._provider = AnthropicProvider(self._config.llm.default_model)
+                provider: LLMProvider = self._provider
                 if self._trace is not None:
                     provider = TracingProvider(
                         provider,
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload,
                     )
-                session_id_str = session.id if session is not None else ""
-                child_runs_dir = (
-                    store.runs_dir(session.id)
-                    if session is not None and store is not None
-                    else self._runs_dir
-                )
-                registry = self._build_registry(
+                task_manager = TaskManager(runtime.tasks_dir or run_path / ".tasks")
+                tools = self._build_registry(
                     task_manager,
                     session=session,
                     store=store,
-                    run_id=run_id,
+                    run_id=context.run_id,
                     provider=provider,
                     bus=bus,
-                    child_runs_dir=child_runs_dir,
-                    session_id=session_id_str,
+                    child_runs_dir=runs_dir,
+                    session_id=agent.session_id,
                     tool_whitelist=tool_whitelist,
+                    context=context,
+                    workspace=workspace,
+                    access=access,
                 )
-                session_dir = (
-                    store.session_dir(session.id)
-                    if session is not None and store is not None
-                    else run_path
+                compactor = Compactor(
+                    bus,
+                    store.session_dir(session.id) if store and session else run_path,
+                    agent.session_id,
                 )
-                compactor = Compactor(bus, session_dir, session_id_str)
                 loop = AgentLoop(
-                    provider, registry, bus,
+                    provider,
+                    tools,
+                    bus,
                     permission_manager=self._permission_manager,
                     compactor=compactor,
                     compact_threshold=self._config.compaction.auto_threshold,
-                    session_id=session_id_str,
+                    session_id=agent.session_id,
                 )
                 await loop.run(context)
             except asyncio.CancelledError:
                 cancelled = True
-                if not context.is_done():
-                    context.mark_failed("cancelled")
+                context.mark_failed("cancelled")
             except Exception:
-                logging.getLogger(__name__).exception(
-                    "agent run failed run_id=%s step=%d", run_id, context.step
+                logging.getLogger(__name__).exception("run failed run_id=%s", context.run_id)
+                context.mark_failed("execution_error")
+            finally:
+                runtime.accepting = False
+                context.repair_tool_results()
+                if session is not None and store is not None:
+                    try:
+                        store.save_agent(agent, context.run_id)
+                    except Exception as exc:
+                        context.mark_failed("persistence_error")
+                        persistence_error = exc
+                if agent.parent_agent_id:
+                    await bus.publish(
+                        SubagentFinishedEvent(
+                            run_id=context.run_id,
+                            parent_run_id=parent_run_id or "",
+                            status=context.status,
+                            ts=_now(),
+                        )
+                    )
+                await bus.publish(
+                    RunFinishedEvent(
+                        run_id=context.run_id,
+                        status=context.status,
+                        reason=context.reason,
+                        steps=context.step,
+                        ts=_now(),
+                    )
                 )
-                if not context.is_done():
-                    context.mark_failed("llm_error")
-
-            await bus.publish(
-                RunFinishedEvent(
-                    run_id=run_id,
-                    status=context.status,
-                    reason=context.reason,
-                    steps=context.step,
-                    ts=_now(),
-                )
-            )
-
-        if session is not None and store is not None:
-            store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
-
+        if persistence_error is not None:
+            raise persistence_error
         if cancelled:
             raise asyncio.CancelledError()
-
-        return RunOutcome(
-            status=context.status,
-            result=context.result,
-            reason=context.reason,
-        )

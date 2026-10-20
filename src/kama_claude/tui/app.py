@@ -4,11 +4,11 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
-log = logging.getLogger(__name__)
-
 from rich.markdown import Markdown
+from rich.markup import escape
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -18,9 +18,15 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Label, Static, TextArea
 
+from kama_claude.core.bus.commands import SessionListResult
 from kama_claude.core.config import KamaConfig
+from kama_claude.core.session.manager import SESSION_BUSY
 from kama_claude.core.skills.loader import SkillLoader
 from kama_claude.core.transport.socket_client import IpcError, SocketClient
+from kama_claude.tui.agent_panel import AgentPanel
+from kama_claude.tui.session_picker import SessionPicker
+
+log = logging.getLogger(__name__)
 
 
 def _preview(s: str, n: int) -> str:
@@ -178,10 +184,28 @@ class PermissionSelect(Static):
             super().__init__()
 
     # 初始化控件，存储工具 ID（用于 IPC 回复）
-    def __init__(self, tool_use_id: str) -> None:
+    def __init__(
+        self, tool_use_id: str, *, request_id: str | None = None,
+        path_request: bool = False, session_id: str | None = None,
+    ) -> None:
         super().__init__("")
         self._tool_use_id = tool_use_id
+        self.request_id = request_id
+        self.session_id = session_id
+        self.key = request_id or tool_use_id
+        self._submitting = False
         self._cursor = 0
+        if path_request:
+            self._CHOICES = (
+                ("allow_once", "允许本次", "y / 1"),
+                ("allow_session", "允许当前会话", "s / 2"),
+                ("deny_once", "拒绝", "n / 3"),
+            )
+            self._KEY_MAP = {
+                "y": "allow_once", "1": "allow_once",
+                "s": "allow_session", "2": "allow_session",
+                "n": "deny_once", "3": "deny_once",
+            }
 
     def on_mount(self) -> None:
         self.update(self._render_ui())
@@ -204,7 +228,10 @@ class PermissionSelect(Static):
 
     # 焦点到达时记录，用于确认 focus() 是否真正生效
     def on_focus(self, event: events.Focus) -> None:
-        log.debug("PermissionSelect.on_focus  has_focus=%s  app.focused=%r", self.has_focus, self.app.focused)
+        log.debug(
+            "PermissionSelect.on_focus  has_focus=%s  app.focused=%r",
+            self.has_focus, self.app.focused,
+        )
 
     # 焦点离开时记录，用于追踪是否被其他控件抢走焦点
     def on_blur(self, event: events.Blur) -> None:
@@ -245,7 +272,9 @@ class PermissionSelect(Static):
     # 发布决策消息，由宿主 App 负责 IPC 回复和控件清理
     def _pick(self, decision: str) -> None:
         log.debug("PermissionSelect._pick  decision=%s", decision)
-        self.post_message(self.Decided(self, self._tool_use_id, decision))
+        if not self._submitting and decision in {c[0] for c in self._CHOICES}:
+            self._submitting = True
+            self.post_message(self.Decided(self, self._tool_use_id, decision))
 
 
 class PermissionBlock(Static):
@@ -254,6 +283,9 @@ class PermissionBlock(Static):
     _LABEL_MAP: dict[str, str] = {
         "allow_once":   "allowed (once)",
         "always_allow": "always allowed",
+        "allow_session": "已允许当前会话（不持久化）",
+        "client_disconnected": "连接已断开，授权已撤销",
+        "cancelled": "审批已取消",
         "deny_once":    "denied",
         "always_deny":  "always denied",
         "timeout":      "⏱ timed out",
@@ -268,28 +300,50 @@ class PermissionBlock(Static):
             super().__init__()
 
     # 初始化审批块，记录工具 ID、名称和参数预览
-    def __init__(self, tool_use_id: str, tool_name: str, param_preview: str) -> None:
+    def __init__(
+        self, tool_use_id: str, tool_name: str, param_preview: str,
+        paths: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._tool_use_id = tool_use_id
         self._tool_name = tool_name
-        self._param_preview = param_preview
+        self._param_preview = escape(param_preview)
+        self._paths = paths or []
         self._resolved = False
         super().__init__(self._pending_text(), classes="log-line")
 
+    # 显示完整规范化路径及作用范围，目录权限只覆盖目标及其子树
+    def _path_text(self) -> str:
+        lines = []
+        operations = {"create_dir": "创建目录", "write": "写文件", "read": "读文件",
+                      "list": "列目录", "shell": "Shell 访问"}
+        for path in self._paths:
+            kind = "目录（含子目录）" if path.get("kind") == "directory" else "文件（仅此文件）"
+            access = "读写" if path.get("access") == "write" else "只读"
+            operation = operations.get(str(path.get("operation")), "访问")
+            lines.append(f"  {operation} · {access} · 授权{kind}：\n"
+                         f"  [bold]{escape(str(path.get('path', '')))}[/bold]")
+        if lines:
+            lines.append("  [dim]仅本次或当前会话有效；不保存为永久路径权限。[/dim]")
+        return "\n" + "\n".join(lines) if lines else ""
+
+    # 生成待审批摘要并附带完整路径
     def _pending_text(self) -> str:
         preview = f"  [dim]{self._param_preview}[/dim]" if self._param_preview else ""
-        return f"[bold red]? permission[/bold red]  [bold]{self._tool_name}[/bold]{preview}"
+        return (f"[bold red]? permission[/bold red]  [bold]{escape(self._tool_name)}[/bold]"
+                f"{preview}{self._path_text()}")
 
     # 将块收缩为单行摘要并发布 Resolved 消息
     def _resolve(self, decision: str) -> None:
         if self._resolved:
             return
         self._resolved = True
-        allowed = decision in ("allow_once", "always_allow")
+        allowed = decision in ("allow_once", "allow_session", "always_allow")
         icon = "[bold green]✓[/bold green]" if allowed else "[bold red]✗[/bold red]"
         label = self._LABEL_MAP.get(decision, decision)
         preview = f"  [dim]{self._param_preview}[/dim]" if self._param_preview else ""
         self.update(
-            f"{icon} permission  [bold]{self._tool_name}[/bold]{preview}  [dim]{label}[/dim]"
+            f"{icon} permission  [bold]{escape(self._tool_name)}[/bold]{preview}  "
+            f"[dim]{label}[/dim]{self._path_text()}"
         )
         self.post_message(self.Resolved(self, decision))
 
@@ -467,6 +521,7 @@ class KamaTuiApp(App[None]):
     TITLE = "KamaClaude"
     BINDINGS = [
         Binding("ctrl+q", "quit", "quit"),
+        Binding("ctrl+g", "agents", "agents", priority=True),
     ]
     CSS = """
     Screen { background: $background; }
@@ -492,24 +547,48 @@ class KamaTuiApp(App[None]):
     """
 
     _BANNER = (
-        "[bold cyan]██╗  ██╗ █████╗ ███╗   ███╗ █████╗  ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗[/bold cyan]\n"
-        "[bold cyan]██║ ██╔╝██╔══██╗████╗ ████║██╔══██╗██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝[/bold cyan]\n"
-        "[bold cyan]█████╔╝ ███████║██╔████╔██║███████║██║     ██║     ███████║██║   ██║██║  ██║█████╗  [/bold cyan]\n"
-        "[bold cyan]██╔═██╗ ██╔══██║██║╚██╔╝██║██╔══██║██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  [/bold cyan]\n"
-        "[bold cyan]██║  ██╗██║  ██║██║ ╚═╝ ██║██║  ██║╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗[/bold cyan]\n"
-        "[bold cyan]╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝[/bold cyan]\n"
-        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 退出[/dim]"
+        "[bold cyan]"
+        "██╗  ██╗ █████╗ ███╗   ███╗ █████╗  ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗"
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "██║ ██╔╝██╔══██╗████╗ ████║██╔══██╗██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝"
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "█████╔╝ ███████║██╔████╔██║███████║██║     ██║     ███████║██║   ██║██║  ██║█████╗  "
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "██╔═██╗ ██╔══██║██║╚██╔╝██║██╔══██║██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  "
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "██║  ██╗██║  ██║██║ ╚═╝ ██║██║  ██║╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗"
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝"
+        "[/bold cyan]\n"
+        "[dim]  输入消息开始对话  ·  /resume 继续历史会话  ·  Ctrl+Q 退出[/dim]"
     )
 
     # 初始化连接参数和 TUI 内部状态
-    def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
+    def __init__(
+        self, host: str, port: int, replay_run_id: str | None = None,
+        resume_session_id: str | None = None,
+        *, workspace: Path | None = None,
+    ) -> None:
         super().__init__()
+        if replay_run_id is not None and resume_session_id is not None:
+            raise ValueError("resume and replay are mutually exclusive")
         self._host = host
         self._port = port
+        self._workspace = workspace if workspace is not None else Path.cwd()
         self._replay_run_id = replay_run_id
+        self._replaying = False
+        self._resume_target_id = resume_session_id
+        self._switching_session = False
+        self._session_run_ids: set[str] = set()
         self._client: SocketClient | None = None
         self._current_llm: LLMStreamBlock | None = None
-        self._pending_tool_blocks: dict[str, ToolCallBlock] = {}
+        self._llm_streams: dict[tuple[str, str], LLMStreamBlock] = {}
+        self._pending_tool_blocks: dict[tuple[str, str], ToolCallBlock] = {}
         self._pending_permission_blocks: dict[str, PermissionBlock] = {}
         self._session_id: str | None = None
         self._busy = False
@@ -533,17 +612,27 @@ class KamaTuiApp(App[None]):
 
     # 构建斜杠命令候选列表：内建命令 + 所有已注册 skill
     def _build_slash_items(self) -> list[tuple[str, str]]:
-        items: list[tuple[str, str]] = [("compact", "compress context window")]
+        items: list[tuple[str, str]] = [
+            ("compact", "compress context window"), ("resume", "继续历史会话"),
+            ("agents", "查看和管理子 agent（Ctrl+G）"),
+        ]
         try:
-            loader = SkillLoader()
+            loader = SkillLoader(self._workspace)
             for skill in loader.list_all_skills():
                 desc = skill.description.splitlines()[0] if skill.description else ""
                 if len(desc) > 60:
                     desc = desc[:57] + "..."
-                items.append((skill.name, desc))
+                if skill.name not in {"compact", "resume", "agents"}:
+                    items.append((skill.name, desc))
         except Exception:
             pass
         return items
+
+    # 即使主输入框禁用，也允许通过快捷键打开管理弹层
+    def action_agents(self) -> None:
+        if self._client is not None and self._session_id is not None:
+            if not isinstance(self.screen, AgentPanel):
+                self.push_screen(AgentPanel(self._client, self._session_id))
 
     # 根据 / 前缀查询字符串挂载、更新或移除自动补全弹窗
     def on_chat_text_area_slash_changed(self, event: ChatTextArea.SlashChanged) -> None:
@@ -583,37 +672,63 @@ class KamaTuiApp(App[None]):
             if select.has_focus:
                 return  # PermissionSelect 有焦点时自行处理，事件不会冒泡到这里
             key = event.key
-            decision = PermissionSelect._KEY_MAP.get(key)
+            decision = select._KEY_MAP.get(key)
             if decision:
                 event.stop()
                 select._pick(decision)
             elif key in ("up", "k"):
                 event.stop()
-                select._cursor = (select._cursor - 1) % len(PermissionSelect._CHOICES)
+                select._cursor = (select._cursor - 1) % len(select._CHOICES)
                 select.update(select._render_ui())
             elif key in ("down", "j"):
                 event.stop()
-                select._cursor = (select._cursor + 1) % len(PermissionSelect._CHOICES)
+                select._cursor = (select._cursor + 1) % len(select._CHOICES)
                 select.update(select._render_ui())
             elif key == "enter":
                 event.stop()
-                select._pick(PermissionSelect._CHOICES[select._cursor][0])
+                select._pick(select._CHOICES[select._cursor][0])
         except Exception:
             pass
 
-    # 退出前尽力关闭当前 session，失败也不阻塞 TUI 退出
+    # 正常退出必须确认会话关闭，忙碌或失败时保留界面并展示原因
     async def action_quit(self) -> None:
         if self._client is not None and self._session_id is not None:
             try:
                 await self._client.send_command("session.close", {"session_id": self._session_id})
-            except (IpcError, RuntimeError, OSError):
-                self._append(Static("[yellow]warning: failed to close session[/yellow]"))
+            except (IpcError, RuntimeError, OSError) as exc:
+                self._append(Static(
+                    f"[yellow]会话尚未关闭：{escape(str(exc))}。请先处理审批或等待任务结束。[/yellow]",
+                    classes="log-line",
+                ))
+                return
         self.exit()
 
     # 将输入框提交内容发送给当前 chat session；用 worker 发送，避免 await 阻塞 App 消息泵
     async def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         content = event.value.strip()
         if not content:
+            return
+        if self._switching_session:
+            return
+        parts = content.split()
+        if content == "/agents":
+            event.text_area.text = ""
+            self.action_agents()
+            return
+        if parts[0] == "/resume":
+            if self._busy or self._client is None:
+                self._append(Static(
+                    "[yellow]任务运行中或连接尚未建立[/yellow]", classes="log-line",
+                ))
+                return
+            if len(parts) > 2:
+                self._append(Static("用法：/resume [session_id]", classes="log-line"))
+                return
+            event.text_area.text = ""
+            operation = (
+                self._restore_session(parts[1]) if len(parts) == 2 else self._choose_session()
+            )
+            self.run_worker(operation, name="resume", group="session", exclusive=True)
             return
         # 检测 /compact 指令
         if content == "/compact":
@@ -633,6 +748,122 @@ class KamaTuiApp(App[None]):
         self._append(Static(f"[bold]>[/bold] {content}", classes="user-turn"))
         self._update_header("running")
         self.run_worker(self._do_send_message(content), name="send_message", exclusive=False)
+
+    # 统一更新恢复过程中的输入状态，未绑定会话时仍允许输入恢复命令
+    def _refresh_session_input(self) -> None:
+        prompt = self._prompt()
+        if prompt is not None:
+            prompt.disabled = self._client is None or self._switching_session or self._busy
+            prompt.read_only = False
+            prompt.border_title = (
+                "正在恢复会话..." if self._switching_session else
+                "输入 /resume 选择会话，或 Ctrl+Q 退出" if self._session_id is None else
+                "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+            )
+            if not prompt.disabled:
+                prompt.focus()
+        self._update_header("ready" if self._session_id else "select session")
+
+    # 请求会话列表并通过现有 Textual 弹层选择，取消时保留当前状态
+    async def _choose_session(self) -> None:
+        client = self._client
+        if client is None or self._switching_session:
+            return
+        selected = None
+        self._switching_session = True
+        self._refresh_session_input()
+        try:
+            result = SessionListResult.model_validate(
+                await client.send_command("session.list", {"workspace": str(self._workspace)}),
+            )
+            if any(s.session_id == self._session_id and s.busy for s in result.sessions):
+                raise IpcError(SESSION_BUSY, "当前会话仍有任务运行，请等待任务结束")
+            if self._client is client:
+                selected = await self.push_screen_wait(SessionPicker([
+                    s for s in result.sessions if s.session_id != self._session_id
+                ]))
+        except (IpcError, RuntimeError, OSError, ValueError) as exc:
+            self._append(Static(
+                f"[red]无法读取会话列表：{escape(str(exc))}[/red]", classes="log-line",
+            ))
+        finally:
+            self._switching_session = False
+            self._refresh_session_input()
+        if selected is not None and self._client is client:
+            await self._restore_session(selected)
+
+    # 恢复指定会话且只显示成功提示，重连时等待原会话的任务结束
+    async def _restore_session(self, sid: str, *, retry_busy: bool = False) -> bool:
+        client = self._client
+        if client is None:
+            return False
+        if sid == self._session_id:
+            return True
+        self._switching_session = True
+        self._refresh_session_input()
+        waiting_shown = False
+        try:
+            while self._client is client:
+                try:
+                    result = await client.send_command("session.resume", {
+                        "session_id": sid, "current_session_id": self._session_id,
+                        "workspace": str(self._workspace),
+                    })
+                    break
+                except IpcError as exc:
+                    if not retry_busy or exc.code != SESSION_BUSY:
+                        raise
+                    if not waiting_shown:
+                        self._append(Static(
+                            "原会话仍有任务运行，正在等待恢复...", classes="log-line",
+                        ))
+                        waiting_shown = True
+                    await asyncio.sleep(2)
+            else:
+                return False
+            if self._client is not client:
+                return False
+            self._session_id = str(result["session_id"])
+            self._resume_target_id = self._session_id
+            self._busy = False
+            self._last_context_pct = 0.0
+            self._current_llm = None
+            self._llm_streams.clear()
+            self._pending_tool_blocks.clear()
+            self._pending_permission_blocks.clear()
+            self._subagent_run_ids.clear()
+            self._subagent_start_times.clear()
+            self._session_run_ids.clear()
+            await self.query_one("#log-view", VerticalScroll).remove_children()
+            for widget in self.query(PermissionSelect):
+                await widget.remove()
+            title = escape(str(result.get("title") or "未命名会话"))
+            self._append(Static(
+                f"[bold cyan]已恢复会话：{title} / {escape(self._session_id)}[/bold cyan]",
+                classes="log-line",
+            ))
+            return True
+        except (IpcError, RuntimeError, OSError) as exc:
+            self._append(Static(f"[red]恢复失败：{escape(str(exc))}[/red]", classes="log-line"))
+            return False
+        finally:
+            self._switching_session = False
+            if self._client is client:
+                self._refresh_session_input()
+
+    # 首次连接创建会话，指定恢复目标或断线重连时始终复用原会话
+    async def _open_session(self) -> None:
+        if self._client is None:
+            return
+        if self._resume_target_id is not None:
+            await self._restore_session(self._resume_target_id, retry_busy=True)
+            return
+        created = await self._client.send_command("session.create", {
+            "mode": "chat", "workspace": str(self._workspace),
+        })
+        self._session_id = str(created["session_id"])
+        self._resume_target_id = self._session_id
+        self._refresh_session_input()
 
     # 在 worker 中执行手动压缩命令，完成后显示结果横幅
     async def _do_compact(self) -> None:
@@ -674,33 +905,37 @@ class KamaTuiApp(App[None]):
             self._update_header("ready")
             self._append(Static(f"[red]send error: {e}[/red]", classes="log-line"))
 
-    # 处理内联审批控件的用户决策：发送 IPC 响应并恢复输入框
+    # 收到服务端确认后才更新审批状态；失败时保留控件供重试
     async def on_permission_select_decided(self, msg: PermissionSelect.Decided) -> None:
-        tool_use_id = msg.tool_use_id
-        decision = msg.decision
-        log.info("permission decided tool_use_id=%s decision=%s", tool_use_id, decision)
         try:
-            msg.widget.remove()
-            perm_block = self._pending_permission_blocks.pop(tool_use_id, None)
-            if perm_block is not None:
-                perm_block._resolve(decision)
-            if self._client is not None:
-                try:
-                    await self._client.send_command(
-                        "permission.respond",
-                        {"tool_use_id": tool_use_id, "decision": decision},
-                    )
-                except (IpcError, RuntimeError, OSError):
-                    pass
-            if not self._pending_permission_blocks:
-                p = self._prompt()
-                if p is not None:
-                    p.disabled = False
-                    p.read_only = False
-                    p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-                    p.focus()
-        except Exception:
-            log.exception("on_permission_select_decided failed tool_use_id=%s", tool_use_id)
+            if self._client is None:
+                raise RuntimeError("连接已断开")
+            result = await self._client.send_command("permission.respond", {
+                "tool_use_id": msg.tool_use_id, "decision": msg.decision,
+                "request_id": msg.widget.request_id, "session_id": msg.widget.session_id,
+            })
+            if not result.get("ok", False):
+                raise RuntimeError("审批未被接受：请求已过期、已处理或不属于当前会话")
+            self._finish_permission(msg.widget.key, msg.decision)
+        except (IpcError, RuntimeError, OSError) as exc:
+            msg.widget._submitting = False
+            self._append(Static(f"[red]审批响应失败：{escape(str(exc))}[/red]", classes="log-line"))
+
+    # 按请求标识清理对应控件，避免并发审批互相覆盖
+    def _finish_permission(self, key: str, decision: str) -> None:
+        block = self._pending_permission_blocks.pop(key, None)
+        if block is not None:
+            block._resolve(decision)
+        for select in self.query(PermissionSelect):
+            if select.key == key:
+                select.remove()
+        if not self._pending_permission_blocks:
+            prompt = self._prompt()
+            if prompt is not None:
+                prompt.disabled = False
+                prompt.read_only = False
+                prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                prompt.focus()
 
     # 向日志视图追加一个 widget 并滚动到底部
     def _append(self, widget: Widget) -> None:
@@ -709,10 +944,13 @@ class KamaTuiApp(App[None]):
         log_view.scroll_end(animate=False)
 
     # 结束当前 LLM 流式块（下一个 token 将开启新块）
-    def _break_llm(self) -> None:
-        if self._current_llm is not None:
-            self._current_llm.finalize_markdown()
-        self._current_llm = None
+    def _break_llm(self, run_id: str | None = None) -> None:
+        for key in list(self._llm_streams):
+            if run_id is None or key[1] == run_id:
+                block = self._llm_streams.pop(key)
+                block.finalize_markdown()
+                if self._current_llm is block:
+                    self._current_llm = None
 
     # 将选择控件挂载到 Screen 顶层（#prompt 之前），避免 VerticalScroll 争抢焦点
     def _mount_permission_select(self, select: PermissionSelect) -> None:
@@ -805,25 +1043,27 @@ class KamaTuiApp(App[None]):
                 }
                 if self._replay_run_id is not None:
                     params["replay_from_run"] = self._replay_run_id
+                    self._replaying = True
                 await client.send_command("event.subscribe", params)
-                created = await client.send_command("session.create", {"mode": "chat"})
-                self._session_id = str(created["session_id"])
-                log.info("session created session_id=%s", self._session_id)
-                prompt = self._prompt()
-                if prompt is not None:
-                    prompt.disabled = False
-                    prompt.read_only = False
-                    prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-                    prompt.focus()
-                self._update_header("ready")
+                self._replaying = False
+                self._replay_run_id = None
+                await self._open_session()
                 await loop_task
-            except IpcError as e:
+            except (IpcError, RuntimeError, OSError) as e:
                 header.update(f"[bold]KamaClaude[/bold]  [red]subscribe error: {e}[/red]")
             finally:
+                self._replaying = False
                 if not loop_task.done():
                     loop_task.cancel()
+                await asyncio.gather(loop_task, return_exceptions=True)
+                if isinstance(self.screen, SessionPicker):
+                    self.screen.dismiss(None)
+                for key in list(self._pending_permission_blocks):
+                    self._finish_permission(key, "client_disconnected")
                 self._client = None
                 self._session_id = None
+                self._busy = False
+                self._session_run_ids.clear()
                 prompt = self._prompt()
                 if prompt is not None:
                     prompt.disabled = True
@@ -838,24 +1078,63 @@ class KamaTuiApp(App[None]):
     # 根据事件 type 路由到对应渲染逻辑；捕获异常防止 socket loop 因单个事件崩溃
     def _handle_event(self, event: dict[str, Any]) -> None:
         try:
-            self._handle_event_inner(event)
+            if self._accept_session_event(event):
+                self._handle_event_inner(event)
         except Exception:
             log.exception("_handle_event crashed  event_type=%s", event.get("type", "?"))
+
+    # 用会话消息事件关联主运行和子运行，过滤其他窗口或切换前的事件
+    def _accept_session_event(self, event: dict[str, Any]) -> bool:
+        if self._replaying:
+            return True
+        if self._session_id is None:
+            return False
+        event_type = event.get("type", "")
+        sid = event.get("session_id")
+        if sid is not None:
+            if sid != self._session_id:
+                return False
+            if event_type == "session.message_received" and event.get("run_id"):
+                self._session_run_ids.add(str(event["run_id"]))
+            return True
+        run_id = event.get("run_id")
+        if event_type == "subagent.started" and event.get("parent_run_id") in self._session_run_ids:
+            self._session_run_ids.add(str(run_id))
+            return True
+        if event_type in {"permission.granted", "permission.denied"}:
+            key = str(event.get("request_id") or event.get("tool_use_id", ""))
+            if key in self._pending_permission_blocks:
+                return True
+        return run_id is None or run_id in self._session_run_ids
 
     # 实际的事件路由逻辑
     def _handle_event_inner(self, event: dict[str, Any]) -> None:
         t = event.get("type", "")
+        if t == "permission.requested" and event.get("session_id") != self._session_id:
+            return
+        if t.startswith("session."):
+            if self._session_id and event.get("session_id") != self._session_id:
+                return
+            if self._switching_session and t in {"session.waiting_for_input", "session.closed"}:
+                return
 
         if t == "llm.token":
             token = event.get("token", "")
-            if self._current_llm is None:
+            stream_key = (str(event.get("agent_id") or "main"), str(event.get("run_id", "")))
+            if stream_key not in self._llm_streams:
                 llm_block = LLMStreamBlock()
+                if stream_key[0] != "main":
+                    self._append(Static(
+                        f"[dim]agent {escape(stream_key[0])}[/dim]", classes="log-line",
+                    ))
                 self._append(llm_block)
-                self._current_llm = llm_block
+                self._llm_streams[stream_key] = llm_block
+            self._current_llm = self._llm_streams[stream_key]
             self._current_llm.append_token(token)
             return
 
-        self._break_llm()
+        if event.get("run_id"):
+            self._break_llm(str(event["run_id"]))
 
         if t == "session.waiting_for_input":
             self._busy = False
@@ -941,26 +1220,30 @@ class KamaTuiApp(App[None]):
             tc_block = ToolCallBlock(tool_name, params)
             if run_id in self._subagent_run_ids:
                 tc_block.styles.padding = (0, 2, 0, 6)
-            self._pending_tool_blocks[tool_use_id] = tc_block
+            self._pending_tool_blocks[(str(run_id), tool_use_id)] = tc_block
             self._append(tc_block)
 
         elif t == "tool.call_finished":
             tool_use_id = str(event.get("tool_use_id", ""))
+            tool_key = (str(event.get("run_id", "")), tool_use_id)
             elapsed_ms = int(event.get("elapsed_ms") or 0)
             output = str(event.get("output") or "")
-            if tool_use_id in self._pending_tool_blocks:
-                tc_done = self._pending_tool_blocks.pop(tool_use_id)
+            if tool_key in self._pending_tool_blocks:
+                tc_done = self._pending_tool_blocks.pop(tool_key)
                 tc_done.set_result(output, elapsed_ms)
 
         elif t == "tool.call_failed":
             tool_use_id = str(event.get("tool_use_id", ""))
+            tool_key = (str(event.get("run_id", "")), tool_use_id)
             elapsed_ms = int(event.get("elapsed_ms") or 0)
             error_msg = str(event.get("error_message") or "")
-            if tool_use_id in self._pending_tool_blocks:
-                tc_done = self._pending_tool_blocks.pop(tool_use_id)
+            if tool_key in self._pending_tool_blocks:
+                tc_done = self._pending_tool_blocks.pop(tool_key)
                 tc_done.set_result(error_msg, elapsed_ms, is_error=True)
 
         elif t == "run.finished":
+            if event.get("agent_id") not in (None, "main"):
+                return
             status = event.get("status", "")
             steps = event.get("steps", 0)
             reason = event.get("reason") or ""
@@ -1014,36 +1297,34 @@ class KamaTuiApp(App[None]):
                 "permission.requested tool=%s id=%s  app.focused=%s",
                 tool_name, tool_use_id, _focused_repr,
             )
-            perm_block = PermissionBlock(tool_use_id, tool_name, param_preview)
-            self._pending_permission_blocks[tool_use_id] = perm_block
+            request_id = event.get("request_id")
+            paths = event.get("paths", [])
+            key = str(request_id or tool_use_id)
+            if key in self._pending_permission_blocks:
+                return
+            if paths:
+                param_preview = str(event.get("params", {}).get("command", param_preview))
+            perm_block = PermissionBlock(tool_use_id, tool_name, param_preview, paths)
+            self._pending_permission_blocks[key] = perm_block
             prompt = self._prompt()
             if prompt is not None:
                 prompt.disabled = True
                 prompt.border_title = "permission required"
             self._append(perm_block)
-            select = PermissionSelect(tool_use_id)
+            select = PermissionSelect(
+                tool_use_id, request_id=request_id, path_request=bool(paths),
+                session_id=event.get("session_id"),
+            )
             self._mount_permission_select(select)
-            log.debug("PermissionSelect mounted before #prompt  pending=%d", len(self._pending_permission_blocks))
+            log.debug(
+                "PermissionSelect mounted before #prompt  pending=%d",
+                len(self._pending_permission_blocks),
+            )
 
-        elif t == "permission.denied":
-            # 处理超时或断连等非用户交互触发的 deny（用户主动 deny 已由 on_permission_select_decided 处理）
-            tool_use_id = str(event.get("tool_use_id", ""))
-            decision = str(event.get("decision", "denied"))
-            if tool_use_id in self._pending_permission_blocks:
-                perm_block = self._pending_permission_blocks.pop(tool_use_id)
-                perm_block._resolve(decision)
-                try:
-                    select = self.query_one(PermissionSelect)
-                    select.remove()
-                except Exception:
-                    pass
-                if not self._pending_permission_blocks:
-                    p = self._prompt()
-                    if p is not None:
-                        p.disabled = False
-                        p.read_only = False
-                        p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-                        p.focus()
+        elif t in ("permission.denied", "permission.granted"):
+            key = str(event.get("request_id") or event.get("tool_use_id", ""))
+            if key in self._pending_permission_blocks:
+                self._finish_permission(key, str(event.get("decision", "denied")))
 
         elif t == "log.line":
             level = event.get("level", "INFO")

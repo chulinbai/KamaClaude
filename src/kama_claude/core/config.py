@@ -8,7 +8,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from kama_claude.core.sandbox.models import NetworkPolicy, WindowsSandboxConfig
+from kama_claude.core.sandbox.models import FileSystemPolicy, NetworkPolicy, WindowsSandboxConfig
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7437
@@ -53,7 +53,8 @@ class PermissionConfig:
 
 @dataclass
 class CompactionConfig:
-    auto_threshold: float = 0.0    # context_pct 触发自动压缩的阈值（0 表示禁用，推荐用手动 /compact）
+    # context_pct 自动压缩阈值（0 禁用，推荐手动 /compact）
+    auto_threshold: float = 0.0
     tool_result_limit: int = 8_000  # tool_result 截断触发字符数
     tool_result_keep: int = 4_000   # 截断后保留的前缀字符数
 
@@ -76,6 +77,7 @@ class McpConfig:
 
 @dataclass
 class SandboxConfig:
+    filesystem: FileSystemPolicy = field(default_factory=lambda: FileSystemPolicy(read_roots=()))
     windows: WindowsSandboxConfig = field(default_factory=WindowsSandboxConfig)
 
 
@@ -133,8 +135,27 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
 
     if "sandbox" in data:
         sandbox = data["sandbox"]
-        if not isinstance(sandbox, dict) or set(sandbox) - {"windows"}:
-            raise SystemExit("Config error: [sandbox] only accepts windows")
+        if not isinstance(sandbox, dict) or set(sandbox) - {"windows", "filesystem"}:
+            raise SystemExit("Config error: [sandbox] only accepts filesystem and windows")
+        filesystem = sandbox.get("filesystem", {})
+        path_keys = {
+            "readonly_paths": "read_roots", "readwrite_paths": "write_roots",
+            "denied_paths": "deny_paths",
+        }
+        if not isinstance(filesystem, dict) or set(filesystem) - path_keys.keys():
+            raise SystemExit("Config error: invalid [sandbox.filesystem] keys")
+        for key, value in filesystem.items():
+            if not isinstance(value, list) or not all(isinstance(p, str) and p for p in value):
+                raise SystemExit(f"Config error: sandbox.filesystem.{key} must be a path array")
+            paths = tuple(Path(p) for p in value)
+            fs = config.sandbox.filesystem
+            if key == "readonly_paths":
+                fs = replace(fs, read_roots=paths)
+            elif key == "readwrite_paths":
+                fs = replace(fs, write_roots=paths)
+            else:
+                fs = replace(fs, deny_paths=paths)
+            config.sandbox.filesystem = fs
         windows = sandbox.get("windows", {})
         keys = {"mxc_executable", "network", "readonly_paths", "readwrite_paths", "denied_paths"}
         if not isinstance(windows, dict) or set(windows) - keys:
@@ -264,7 +285,9 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
         comp = data["compaction"]
         if not isinstance(comp, dict):
             raise SystemExit("Config error: [compaction] must be a table")
-        unknown_comp: set[str] = set(comp.keys()) - {"auto_threshold", "tool_result_limit", "tool_result_keep"}
+        unknown_comp: set[str] = set(comp.keys()) - {
+            "auto_threshold", "tool_result_limit", "tool_result_keep",
+        }
         if unknown_comp:
             raise SystemExit(f"Unknown [compaction] keys: {', '.join(sorted(unknown_comp))}")
         if "auto_threshold" in comp:
@@ -275,12 +298,16 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
         if "tool_result_limit" in comp:
             val = comp["tool_result_limit"]
             if not isinstance(val, int) or val <= 0:
-                raise SystemExit("Config error: compaction.tool_result_limit must be a positive integer")
+                raise SystemExit(
+                    "Config error: compaction.tool_result_limit must be a positive integer"
+                )
             config.compaction.tool_result_limit = val
         if "tool_result_keep" in comp:
             val = comp["tool_result_keep"]
             if not isinstance(val, int) or val <= 0:
-                raise SystemExit("Config error: compaction.tool_result_keep must be a positive integer")
+                raise SystemExit(
+                    "Config error: compaction.tool_result_keep must be a positive integer"
+                )
             config.compaction.tool_result_keep = val
 
     if "mcp" in data:
@@ -301,7 +328,9 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
                 raise SystemExit(f"Config error: mcp.servers[{i}].name must be a non-empty string")
             transport = srv.get("transport", "stdio")
             if transport not in ("stdio", "tcp"):
-                raise SystemExit(f"Config error: mcp.servers[{i}].transport must be 'stdio' or 'tcp'")
+                raise SystemExit(
+                    f"Config error: mcp.servers[{i}].transport must be 'stdio' or 'tcp'"
+                )
             s = McpServerConfig(name=name, transport=transport)
             if "command" in srv:
                 val = srv["command"]
@@ -412,7 +441,8 @@ def _apply_env(config: KamaConfig) -> None:
             compact_threshold_val = float(compact_threshold)
             if not (0.0 <= compact_threshold_val <= 1.0):
                 raise SystemExit(
-                    f"Config error: KAMA_COMPACT_THRESHOLD must be between 0 and 1, got: {compact_threshold!r}"
+                    "Config error: KAMA_COMPACT_THRESHOLD must be between 0 and 1, "
+                    f"got: {compact_threshold!r}"
                 )
             config.compaction.auto_threshold = compact_threshold_val
         except ValueError:
@@ -426,12 +456,14 @@ def _apply_env(config: KamaConfig) -> None:
             compact_tool_limit_val = int(compact_tool_limit)
             if compact_tool_limit_val <= 0:
                 raise SystemExit(
-                    f"Config error: KAMA_COMPACT_TOOL_LIMIT must be a positive integer, got: {compact_tool_limit!r}"
+                    "Config error: KAMA_COMPACT_TOOL_LIMIT must be a positive integer, "
+                    f"got: {compact_tool_limit!r}"
                 )
             config.compaction.tool_result_limit = compact_tool_limit_val
         except ValueError:
             raise SystemExit(
-                f"Config error: KAMA_COMPACT_TOOL_LIMIT must be an integer, got: {compact_tool_limit!r}"
+                "Config error: KAMA_COMPACT_TOOL_LIMIT must be an integer, "
+                f"got: {compact_tool_limit!r}"
             )
 
     compact_tool_keep = os.environ.get("KAMA_COMPACT_TOOL_KEEP")
@@ -440,10 +472,12 @@ def _apply_env(config: KamaConfig) -> None:
             compact_tool_keep_val = int(compact_tool_keep)
             if compact_tool_keep_val <= 0:
                 raise SystemExit(
-                    f"Config error: KAMA_COMPACT_TOOL_KEEP must be a positive integer, got: {compact_tool_keep!r}"
+                    "Config error: KAMA_COMPACT_TOOL_KEEP must be a positive integer, "
+                    f"got: {compact_tool_keep!r}"
                 )
             config.compaction.tool_result_keep = compact_tool_keep_val
         except ValueError:
             raise SystemExit(
-                f"Config error: KAMA_COMPACT_TOOL_KEEP must be an integer, got: {compact_tool_keep!r}"
+                "Config error: KAMA_COMPACT_TOOL_KEEP must be an integer, "
+                f"got: {compact_tool_keep!r}"
             )

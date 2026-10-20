@@ -42,7 +42,7 @@ def _parse_skill_file(path: Path) -> Skill:
                     fold = val == ">"
                     parts: list[str] = []
                     i += 1
-                    while i < len(lines) and (lines[i].startswith(" ") or lines[i].startswith("\t")):
+                    while i < len(lines) and lines[i].startswith((" ", "\t")):
                         parts.append(lines[i].strip())
                         i += 1
                     description = (" ".join(parts) if fold else "\n".join(parts)).strip()
@@ -67,6 +67,9 @@ def _parse_skill_file(path: Path) -> Skill:
 class SkillLoader:
     _BUILTIN_DIR = Path(__file__).parent / "builtin"
 
+    def __init__(self, workspace: Path | None = None) -> None:
+        self._workspace = workspace if workspace is not None else Path.cwd()
+
     # 按优先级查找 skill 文件；未找到返回 None
     def resolve(self, name: str) -> Skill | None:
         for path in self._search_paths(name):
@@ -80,7 +83,7 @@ class SkillLoader:
     # 返回候选路径列表，同时支持扁平文件（name.md）和目录式（name/SKILL.md）两种格式
     def _search_paths(self, name: str) -> list[Path]:
         dirs = [
-            Path(".kama/skills"),
+            self._workspace / ".kama/skills",
             Path("~/.kama/skills").expanduser(),
             self._BUILTIN_DIR,
         ]
@@ -96,7 +99,7 @@ class SkillLoader:
         for d in [
             self._BUILTIN_DIR,
             Path("~/.kama/skills").expanduser(),
-            Path(".kama/skills"),
+            self._workspace / ".kama/skills",
         ]:
             if d.exists():
                 for f in sorted(d.glob("*.md")):
@@ -111,7 +114,7 @@ class SkillLoader:
         for d in [
             self._BUILTIN_DIR,
             Path("~/.kama/skills").expanduser(),
-            Path(".kama/skills"),
+            self._workspace / ".kama/skills",
         ]:
             if d.exists():
                 for f in sorted(d.glob("*.md")):

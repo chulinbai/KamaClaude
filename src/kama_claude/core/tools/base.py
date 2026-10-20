@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from kama_claude.core.permissions.paths import PathAccessController
 
 
 @dataclass
@@ -16,7 +19,10 @@ class ToolResult:
 
 
 class BaseTool(ABC):
+    path_access: PathAccessController | None = None
     execution_overhead_s: float = 0
+    retry_errors: bool = True
+    managed_timeout: bool = False
     name: str
     description: str
     input_schema: dict[str, object]

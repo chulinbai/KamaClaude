@@ -108,6 +108,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 |---|---|---|
 | `type` | `string` | no |
 | `goal` | `string` | yes |
+| `workspace` | `string \| null` | no |
 
 ```json
 {
@@ -121,6 +122,19 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "goal": {
       "title": "Goal",
       "type": "string"
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace"
     }
   },
   "required": [
@@ -185,7 +199,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | `type` | `string` | no |
 | `topics` | `array` | yes |
 | `scope` | `string` | no |
-| `replay_from_run` | `string | null` | no |
+| `replay_from_run` | `string \| null` | no |
 
 ```json
 {
@@ -297,6 +311,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | `type` | `string` | no |
 | `mode` | `string` | no |
 | `title` | `string` | no |
+| `workspace` | `string \| null` | no |
 
 ```json
 {
@@ -320,6 +335,19 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       "default": "",
       "title": "Title",
       "type": "string"
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace"
     }
   },
   "title": "SessionCreateCommand",
@@ -340,6 +368,8 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   }
 }
 ```
+
+Clients send their launch directory as an absolute `workspace` for session.create, session.list, session.resume and agent.run. It must be an existing directory; invalid paths return -32602. Omitting workspace retains the Core startup directory for legacy clients. The session persists this workspace and uses it for tools, sandbox cwd, project context and local skills; concurrent sessions never change the Core process cwd.
 
 ### SessionCreateResult
 
@@ -384,6 +414,235 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "session_id": "sess-abc123def456",
     "status": "active"
   }
+}
+```
+
+### `session.list`
+
+Lists chat sessions in the requested workspace, including legacy sessions with unknown workspace. Results are ordered by most recently updated; busy and attached_elsewhere describe live state.
+### SessionListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `workspace` | `string \| null` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "session.list",
+      "default": "session.list",
+      "title": "Type",
+      "type": "string"
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace"
+    }
+  },
+  "title": "SessionListCommand",
+  "type": "object"
+}
+```
+### SessionListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `sessions` | `array` | yes |
+
+```json
+{
+  "$defs": {
+    "SessionSummary": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "updated_at": {
+          "title": "Updated At",
+          "type": "string"
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Workspace"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "waiting_for_input",
+            "closed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "busy": {
+          "default": false,
+          "title": "Busy",
+          "type": "boolean"
+        },
+        "attached_elsewhere": {
+          "default": false,
+          "title": "Attached Elsewhere",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "session_id",
+        "title",
+        "updated_at",
+        "workspace",
+        "status"
+      ],
+      "title": "SessionSummary",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "sessions": {
+      "items": {
+        "$ref": "#/$defs/SessionSummary"
+      },
+      "title": "Sessions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "sessions"
+  ],
+  "title": "SessionListResult",
+  "type": "object"
+}
+```
+
+### `session.resume`
+
+Reopens a persisted chat session without starting a run or replaying history. An optional current_session_id switches sessions only after validation succeeds. The target must match the requested workspace; legacy sessions bind to it on resume. Live tasks or another connection owning the target prevent resumption. Session grants are not restored. Errors: -32010 not found; -32012 busy; -32013 connection ownership; -32014 workspace mismatch; -32015 unsupported mode; -32016 invalid or unreadable session.
+### SessionResumeCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `current_session_id` | `string \| null` | no |
+| `workspace` | `string \| null` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "session.resume",
+      "default": "session.resume",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "current_session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Current Session Id"
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SessionResumeCommand",
+  "type": "object"
+}
+```
+### SessionResumeResult
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string` | yes |
+| `title` | `string` | yes |
+| `workspace` | `string \| null` | yes |
+| `status` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Workspace"
+    },
+    "status": {
+      "enum": [
+        "active",
+        "waiting_for_input",
+        "closed"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "title",
+    "workspace",
+    "status"
+  ],
+  "title": "SessionResumeResult",
+  "type": "object"
 }
 ```
 
@@ -581,6 +840,105 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 }
 ```
 
+### PermissionRespondCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `tool_use_id` | `string` | yes |
+| `request_id` | `string \| null` | no |
+| `session_id` | `string \| null` | no |
+| `decision` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "permission.respond",
+      "default": "permission.respond",
+      "title": "Type",
+      "type": "string"
+    },
+    "tool_use_id": {
+      "title": "Tool Use Id",
+      "type": "string"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Request Id"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    }
+  },
+  "required": [
+    "tool_use_id",
+    "decision"
+  ],
+  "title": "PermissionRespondCommand",
+  "type": "object"
+}
+```
+
+**Example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "approval-1",
+  "method": "permission.respond",
+  "params": {
+    "tool_use_id": "toolu_03",
+    "request_id": "unique-server-request-id",
+    "session_id": "sess-abc123def456",
+    "decision": "allow_session"
+  }
+}
+```
+
+### PermissionRespondResult
+
+| Field | Type | Required |
+|---|---|---|
+| `ok` | `boolean` | no |
+
+```json
+{
+  "properties": {
+    "ok": {
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    }
+  },
+  "title": "PermissionRespondResult",
+  "type": "object"
+}
+```
+
+Path approvals require request_id and only accept allow_once, allow_session or deny_once. The server owns the requested paths; a response cannot modify them. Legacy tool-only approvals remain supported. A false ok means the response was not accepted.
+
 ## Server Push
 
 Events pushed from daemon to subscribed clients over the same TCP connection.
@@ -676,6 +1034,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `goal` | `string` | yes |
@@ -684,6 +1045,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "run.started",
       "default": "run.started",
@@ -728,16 +1125,55 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `status` | `string` | yes |
-| `reason` | `string | null` | no |
+| `reason` | `string \| null` | no |
 | `steps` | `integer` | yes |
 | `ts` | `string` | yes |
 
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "run.finished",
       "default": "run.finished",
@@ -801,6 +1237,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `step` | `integer` | yes |
@@ -809,6 +1248,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "step.started",
       "default": "step.started",
@@ -853,6 +1328,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `step` | `integer` | yes |
@@ -861,6 +1339,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "step.finished",
       "default": "step.finished",
@@ -905,6 +1419,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `tool_use_id` | `string` | yes |
@@ -915,6 +1432,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "tool.call_started",
       "default": "tool.call_started",
@@ -974,6 +1527,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `tool_use_id` | `string` | yes |
@@ -985,6 +1541,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "tool.call_finished",
       "default": "tool.call_finished",
@@ -1046,6 +1638,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `tool_use_id` | `string` | yes |
@@ -1059,6 +1654,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "tool.call_failed",
       "default": "tool.call_failed",
@@ -1133,6 +1764,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `model` | `string` | yes |
@@ -1142,6 +1776,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "llm.model_selected",
       "default": "llm.model_selected",
@@ -1192,6 +1862,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `token` | `string` | yes |
@@ -1200,6 +1873,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "llm.token",
       "default": "llm.token",
@@ -1244,6 +1953,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `input_tokens` | `integer` | yes |
@@ -1256,6 +1968,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "llm.usage",
       "default": "llm.usage",
@@ -1323,6 +2071,9 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 
 | Field | Type | Required |
 |---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
 | `type` | `string` | no |
 | `run_id` | `string` | yes |
 | `level` | `string` | yes |
@@ -1333,6 +2084,42 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 ```json
 {
   "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
     "type": {
       "const": "log.line",
       "default": "log.line",
@@ -1385,7 +2172,390 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 }
 ```
 
+## Permission Events
+
+Each request has a unique request_id, even when tool_use_id repeats across runs. A directory grant covers its subtree; a file grant covers only that exact file. Session path grants are memory-only and are revoked on close, disconnect or restart. Resuming reopens permission checks with no previous session grants or pending approvals.
+
+### PermissionRequestedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string` | yes |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `tool_use_id` | `string` | yes |
+| `tool_name` | `string` | yes |
+| `params` | `object` | yes |
+| `param_preview` | `string` | yes |
+| `request_id` | `string \| null` | no |
+| `workspace` | `string` | no |
+| `reason` | `string` | no |
+| `paths` | `array` | no |
+| `allowed_decisions` | `array` | no |
+| `ts` | `string` | yes |
+
+```json
+{
+  "$defs": {
+    "PathGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "access": {
+          "enum": [
+            "read",
+            "write"
+          ],
+          "title": "Access",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "directory"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "read",
+            "list",
+            "write",
+            "create_dir",
+            "shell"
+          ],
+          "title": "Operation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "access",
+        "kind",
+        "operation"
+      ],
+      "title": "PathGrant",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
+    "type": {
+      "const": "permission.requested",
+      "default": "permission.requested",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "tool_use_id": {
+      "title": "Tool Use Id",
+      "type": "string"
+    },
+    "tool_name": {
+      "title": "Tool Name",
+      "type": "string"
+    },
+    "params": {
+      "additionalProperties": true,
+      "title": "Params",
+      "type": "object"
+    },
+    "param_preview": {
+      "title": "Param Preview",
+      "type": "string"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Request Id"
+    },
+    "workspace": {
+      "default": "",
+      "title": "Workspace",
+      "type": "string"
+    },
+    "reason": {
+      "default": "tool_policy",
+      "title": "Reason",
+      "type": "string"
+    },
+    "paths": {
+      "items": {
+        "$ref": "#/$defs/PathGrant"
+      },
+      "title": "Paths",
+      "type": "array"
+    },
+    "allowed_decisions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Decisions",
+      "type": "array"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "run_id",
+    "tool_use_id",
+    "tool_name",
+    "params",
+    "param_preview",
+    "ts"
+  ],
+  "title": "PermissionRequestedEvent",
+  "type": "object"
+}
+```
+
+### PermissionGrantedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `tool_use_id` | `string` | yes |
+| `request_id` | `string \| null` | no |
+| `decision` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
+    "type": {
+      "const": "permission.granted",
+      "default": "permission.granted",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "tool_use_id": {
+      "title": "Tool Use Id",
+      "type": "string"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Request Id"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "tool_use_id",
+    "decision",
+    "ts"
+  ],
+  "title": "PermissionGrantedEvent",
+  "type": "object"
+}
+```
+
+### PermissionDeniedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `tool_use_id` | `string` | yes |
+| `request_id` | `string \| null` | no |
+| `decision` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
+    "type": {
+      "const": "permission.denied",
+      "default": "permission.denied",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "tool_use_id": {
+      "title": "Tool Use Id",
+      "type": "string"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Request Id"
+    },
+    "decision": {
+      "title": "Decision",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "tool_use_id",
+    "decision",
+    "ts"
+  ],
+  "title": "PermissionDeniedEvent",
+  "type": "object"
+}
+```
+
 ## Session Events
+
+`session.message_received.run_id` links the incoming message to its run before run events are published. Clients can filter a session's root runs and their subagents.
 
 ### SessionCreatedEvent
 
@@ -1446,6 +2616,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 | `type` | `string` | no |
 | `session_id` | `string` | yes |
 | `content` | `string` | yes |
+| `run_id` | `string \| null` | no |
 | `ts` | `string` | yes |
 
 ```json
@@ -1464,6 +2635,18 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
     "content": {
       "title": "Content",
       "type": "string"
+    },
+    "run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Run Id"
     },
     "ts": {
       "title": "Ts",
@@ -1630,6 +2813,577 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
   "type": "session.closed",
   "session_id": "sess-abc123def456",
   "ts": "2026-05-16T10:00:00.001Z"
+}
+```
+
+## Multi-agent coordination
+
+Agent IDs identify in-memory agents within one session; run IDs identify executions. Messages are FIFO and wake only starts idle children. Main is never auto-woken. Limits: 6 children, depth 2, 64 queued messages per agent, 16 KiB per message. All subagent commands require ownership of the session. Run events include optional session_id, agent_id and parent_agent_id for old replay compatibility. Agent histories and queues are not restored after a Core restart.
+
+### SubagentListCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "subagent.list",
+      "default": "subagent.list",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SubagentListCommand",
+  "type": "object"
+}
+```
+### SubagentListResult
+
+| Field | Type | Required |
+|---|---|---|
+| `agents` | `array` | yes |
+
+```json
+{
+  "properties": {
+    "agents": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Agents",
+      "type": "array"
+    }
+  },
+  "required": [
+    "agents"
+  ],
+  "title": "SubagentListResult",
+  "type": "object"
+}
+```
+### SubagentResultCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `agent_id` | `string \| null` | no |
+| `run_id` | `string \| null` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "subagent.result",
+      "default": "subagent.result",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Run Id"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SubagentResultCommand",
+  "type": "object"
+}
+```
+### SubagentSendInputCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `agent_id` | `string` | yes |
+| `message` | `string` | yes |
+| `wake` | `boolean` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "subagent.send_input",
+      "default": "subagent.send_input",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "agent_id": {
+      "title": "Agent Id",
+      "type": "string"
+    },
+    "message": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "wake": {
+      "default": false,
+      "title": "Wake",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "session_id",
+    "agent_id",
+    "message"
+  ],
+  "title": "SubagentSendInputCommand",
+  "type": "object"
+}
+```
+### SubagentCloseCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `agent_id` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "subagent.close",
+      "default": "subagent.close",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "agent_id": {
+      "title": "Agent Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "agent_id"
+  ],
+  "title": "SubagentCloseCommand",
+  "type": "object"
+}
+```
+### SubagentDataResult
+
+| Field | Type | Required |
+|---|---|---|
+| `data` | `object` | yes |
+
+```json
+{
+  "properties": {
+    "data": {
+      "additionalProperties": true,
+      "title": "Data",
+      "type": "object"
+    }
+  },
+  "required": [
+    "data"
+  ],
+  "title": "SubagentDataResult",
+  "type": "object"
+}
+```
+### SubagentStartedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `parent_run_id` | `string` | yes |
+| `description` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
+    "type": {
+      "const": "subagent.started",
+      "default": "subagent.started",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "parent_run_id": {
+      "title": "Parent Run Id",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "parent_run_id",
+    "description",
+    "ts"
+  ],
+  "title": "SubagentStartedEvent",
+  "type": "object"
+}
+```
+### SubagentFinishedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `parent_run_id` | `string` | yes |
+| `status` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
+    "type": {
+      "const": "subagent.finished",
+      "default": "subagent.finished",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "parent_run_id": {
+      "title": "Parent Run Id",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "parent_run_id",
+    "status",
+    "ts"
+  ],
+  "title": "SubagentFinishedEvent",
+  "type": "object"
+}
+```
+### AgentStateEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
+| `type` | `string` | no |
+| `run_id` | `string \| null` | no |
+| `snapshot` | `object` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
+    "type": {
+      "const": "subagent.state_changed",
+      "default": "subagent.state_changed",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Run Id"
+    },
+    "snapshot": {
+      "additionalProperties": true,
+      "title": "Snapshot",
+      "type": "object"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "snapshot",
+    "ts"
+  ],
+  "title": "AgentStateEvent",
+  "type": "object"
+}
+```
+### AgentMessageEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `session_id` | `string \| null` | no |
+| `agent_id` | `string \| null` | no |
+| `parent_agent_id` | `string \| null` | no |
+| `type` | `string` | no |
+| `run_id` | `string \| null` | no |
+| `message_id` | `string` | yes |
+| `sender_agent_id` | `string` | yes |
+| `status` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Agent Id"
+    },
+    "type": {
+      "const": "subagent.message",
+      "default": "subagent.message",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Run Id"
+    },
+    "message_id": {
+      "title": "Message Id",
+      "type": "string"
+    },
+    "sender_agent_id": {
+      "title": "Sender Agent Id",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "message_id",
+    "sender_agent_id",
+    "status",
+    "ts"
+  ],
+  "title": "AgentMessageEvent",
+  "type": "object"
 }
 ```
 

@@ -12,6 +12,8 @@ from kama_claude.core.bus.commands import (
     AgentRunResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    PermissionRespondCommand,
+    PermissionRespondResult,
     PingCommand,
     PongResult,
     SessionCloseCommand,
@@ -20,16 +22,31 @@ from kama_claude.core.bus.commands import (
     SessionCreateResult,
     SessionGetHistoryCommand,
     SessionGetHistoryResult,
+    SessionListCommand,
+    SessionListResult,
+    SessionResumeCommand,
+    SessionResumeResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
+    SubagentCloseCommand,
+    SubagentDataResult,
+    SubagentListCommand,
+    SubagentListResult,
+    SubagentResultCommand,
+    SubagentSendInputCommand,
 )
 from kama_claude.core.bus.envelope import EventPushEnvelope
 from kama_claude.core.bus.events import (
+    AgentMessageEvent,
+    AgentStateEvent,
     CoreStartedEvent,
     LlmModelSelectedEvent,
     LlmTokenEvent,
     LlmUsageEvent,
     LogLineEvent,
+    PermissionDeniedEvent,
+    PermissionGrantedEvent,
+    PermissionRequestedEvent,
     RunFinishedEvent,
     RunStartedEvent,
     SessionClosedEvent,
@@ -39,6 +56,8 @@ from kama_claude.core.bus.events import (
     SessionWaitingForInputEvent,
     StepFinishedEvent,
     StepStartedEvent,
+    SubagentFinishedEvent,
+    SubagentStartedEvent,
     ToolCallFailedEvent,
     ToolCallFinishedEvent,
     ToolCallStartedEvent,
@@ -61,6 +80,7 @@ def _model_section(name: str, model: type, example: dict | None = None) -> str: 
             if "anyOf" in field_info:
                 ftype = " | ".join(t.get("type", "?") for t in field_info["anyOf"])
             req = "yes" if field_name in required else "no"
+            ftype = ftype.replace("|", "\\|")
             table += f"| `{field_name}` | `{ftype}` | {req} |\n"
 
     schema_block = f"\n```json\n{json.dumps(schema, indent=2)}\n```\n"
@@ -173,8 +193,27 @@ def generate() -> str:
         _model_section("EventSubscribeResult", EventSubscribeResult, subscribe_resp_example),
         "\n",
         _model_section("SessionCreateCommand", SessionCreateCommand, session_create_req_example),
-        "\n",
+        "\nClients send their launch directory as an absolute `workspace` for session.create, "
+        "session.list, session.resume and agent.run. It must be an existing directory; invalid "
+        "paths return -32602. Omitting workspace retains the Core startup directory for legacy "
+        "clients. The session persists this workspace and uses it for tools, sandbox cwd, "
+        "project context and local skills; concurrent sessions never change the Core process cwd.\n\n",
         _model_section("SessionCreateResult", SessionCreateResult, session_create_resp_example),
+        "\n### `session.list`\n\n"
+        "Lists chat sessions in the requested workspace, including legacy sessions with unknown workspace. "
+        "Results are ordered by most recently updated; busy and attached_elsewhere describe live state.\n",
+        _model_section("SessionListCommand", SessionListCommand),
+        _model_section("SessionListResult", SessionListResult),
+        "\n### `session.resume`\n\n"
+        "Reopens a persisted chat session without starting a run or replaying history. "
+        "An optional current_session_id switches sessions only after validation succeeds. "
+        "The target must match the requested workspace; legacy sessions bind to it on resume. "
+        "Live tasks or another connection owning the target prevent resumption. "
+        "Session grants are not restored. Errors: -32010 not found; -32012 busy; "
+        "-32013 connection ownership; -32014 workspace mismatch; -32015 unsupported mode; "
+        "-32016 invalid or unreadable session.\n",
+        _model_section("SessionResumeCommand", SessionResumeCommand),
+        _model_section("SessionResumeResult", SessionResumeResult),
         "\n",
         _model_section("SessionSendMessageCommand", SessionSendMessageCommand, session_send_req_example),
         "\n",
@@ -187,6 +226,17 @@ def generate() -> str:
         _model_section("SessionCloseCommand", SessionCloseCommand),
         "\n",
         _model_section("SessionCloseResult", SessionCloseResult),
+        "\n",
+        _model_section("PermissionRespondCommand", PermissionRespondCommand, {
+            "jsonrpc": "2.0", "id": "approval-1", "method": "permission.respond",
+            "params": {"tool_use_id": "toolu_03", "request_id": "unique-server-request-id",
+                       "session_id": session_id, "decision": "allow_session"},
+        }),
+        "\n",
+        _model_section("PermissionRespondResult", PermissionRespondResult),
+        "\nPath approvals require request_id and only accept allow_once, allow_session or deny_once. "
+        "The server owns the requested paths; a response cannot modify them. Legacy tool-only "
+        "approvals remain supported. A false ok means the response was not accepted.\n",
         "\n## Server Push\n\n",
         "Events pushed from daemon to subscribed clients over the same TCP connection.\n\n",
         _model_section("EventPushEnvelope", EventPushEnvelope, event_push_example),
@@ -235,7 +285,19 @@ def generate() -> str:
         _model_section("LogLineEvent", LogLineEvent,
             {"type": "log.line", "run_id": run_id, "level": "INFO",
              "source": "kama_claude.core.loop", "message": "step 1 started", "ts": ts}),
+        "\n## Permission Events\n\n",
+        "Each request has a unique request_id, even when tool_use_id repeats across runs. "
+        "A directory grant covers its subtree; a file grant covers only that exact file. "
+        "Session path grants are memory-only and are revoked on close, disconnect or restart. "
+        "Resuming reopens permission checks with no previous session grants or pending approvals.\n\n",
+        _model_section("PermissionRequestedEvent", PermissionRequestedEvent),
+        "\n",
+        _model_section("PermissionGrantedEvent", PermissionGrantedEvent),
+        "\n",
+        _model_section("PermissionDeniedEvent", PermissionDeniedEvent),
         "\n## Session Events\n\n",
+        "`session.message_received.run_id` links the incoming message to its run before run events "
+        "are published. Clients can filter a session's root runs and their subagents.\n\n",
         _model_section("SessionCreatedEvent", SessionCreatedEvent,
             {"type": "session.created", "session_id": session_id, "mode": "chat", "ts": ts}),
         "\n",
@@ -252,6 +314,23 @@ def generate() -> str:
         "\n",
         _model_section("SessionClosedEvent", SessionClosedEvent,
             {"type": "session.closed", "session_id": session_id, "ts": ts}),
+        "\n## Multi-agent coordination\n\n",
+        "Agent IDs identify in-memory agents within one session; run IDs identify executions. "
+        "Messages are FIFO and wake only starts idle children. Main is never auto-woken. "
+        "Limits: 6 children, depth 2, 64 queued messages per agent, 16 KiB per message. "
+        "All subagent commands require ownership of the session. "
+        "Run events include optional session_id, agent_id and parent_agent_id for old replay "
+        "compatibility. Agent histories and queues are not restored after a Core restart.\n\n",
+        _model_section("SubagentListCommand", SubagentListCommand),
+        _model_section("SubagentListResult", SubagentListResult),
+        _model_section("SubagentResultCommand", SubagentResultCommand),
+        _model_section("SubagentSendInputCommand", SubagentSendInputCommand),
+        _model_section("SubagentCloseCommand", SubagentCloseCommand),
+        _model_section("SubagentDataResult", SubagentDataResult),
+        _model_section("SubagentStartedEvent", SubagentStartedEvent),
+        _model_section("SubagentFinishedEvent", SubagentFinishedEvent),
+        _model_section("AgentStateEvent", AgentStateEvent),
+        _model_section("AgentMessageEvent", AgentMessageEvent),
         "\n## Error Codes\n\n",
         "| Code | Name | Meaning |\n",
         "|------|------|---------|\n",
@@ -279,13 +358,13 @@ def main() -> None:
         if not output_path.exists():
             print(f"ERROR: {output_path} not found — run: make docs", file=sys.stderr)
             sys.exit(1)
-        if output_path.read_text() != content:
+        if output_path.read_text(encoding="utf-8") != content:
             print(f"ERROR: {output_path} out of sync with code — run: make docs", file=sys.stderr)
             sys.exit(1)
         print(f"OK: {output_path} is up to date.")
     else:
         output_path = Path(args.output)
-        output_path.write_text(content)
+        output_path.write_text(content, encoding="utf-8")
         print(f"Generated {output_path}")
 
 

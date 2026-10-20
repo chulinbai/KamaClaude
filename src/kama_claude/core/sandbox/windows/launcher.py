@@ -79,9 +79,11 @@ def backend_error(stderr: str) -> tuple[str, str] | None:
 
 
 async def execute(request: SandboxExecRequest) -> SandboxExecResult:
+    from .hardlinks import audit_hardlinks
     from .path_locks import lock_paths
 
     with lock_paths(request.path_locks):
+        audit_hardlinks(request.hardlink_audit_roots, Path(request.argv[0]))
         return await _execute_locked(request)
 
 

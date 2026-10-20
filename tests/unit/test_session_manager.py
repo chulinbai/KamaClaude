@@ -10,9 +10,14 @@ from kama_claude.core.runner import RunOutcome
 from kama_claude.core.session.manager import SESSION_CLOSED, SESSION_NOT_FOUND, SessionManager
 from kama_claude.core.session.model import Session
 from kama_claude.core.session.store import SessionStore
+from kama_claude.core.subagent.registry import AgentRegistry
 
 
 class _Runner:
+    # 测试替身接入会话共享的上下文容器
+    def bind_registry(self, registry: AgentRegistry) -> None:
+        self.registry = registry
+
     # 模拟 AgentRunner，将 run 新消息写入 thread 后返回成功
     async def run_and_capture(
         self,
@@ -27,11 +32,11 @@ class _Runner:
         assert run_id is not None
         assert session is not None
         assert store is not None
-        store.append_messages(
-            session.id,
-            [{"role": "assistant", "content": [{"type": "text", "text": f"done {goal}"}]}],
-            run_id,
-        )
+        agent = self.registry.ensure_main().context
+        agent.messages.append({
+            "role": "assistant", "content": [{"type": "text", "text": f"done {goal}"}],
+        })
+        store.save_agent(agent, run_id)
         return RunOutcome(status="success", result="done", reason=None)
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel
 
@@ -16,6 +16,7 @@ class ToolResult:
     is_error: bool = False
     # 通用错误，以及 Bash 的 command_failed、sandbox_denied 和 sandbox_* 初始化错误
     error_type: str | None = None
+    content_blocks: list[dict[str, Any]] | None = None
 
 
 class BaseTool(ABC):

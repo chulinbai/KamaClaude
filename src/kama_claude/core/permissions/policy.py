@@ -42,6 +42,7 @@ DEFAULT_POLICIES: dict[str, ToolPolicy] = {
     "write_file": ToolPolicy(default=PermissionDecision.ASK),
     "create_dir": ToolPolicy(default=PermissionDecision.ASK),
     "read_file":  ToolPolicy(default=PermissionDecision.ALLOW),
+    "read_image": ToolPolicy(default=PermissionDecision.ALLOW),
     "list_dir":   ToolPolicy(default=PermissionDecision.ALLOW),
     "note_save":  ToolPolicy(default=PermissionDecision.ALLOW),
 }
@@ -53,6 +54,7 @@ _UNKNOWN_TOOL_DEFAULT = PermissionDecision.ASK
 _PREVIEW_KEY: dict[str, str] = {
     "bash":       "command",
     "read_file":  "path",
+    "read_image": "path",
     "write_file": "path",
     "list_dir":   "path",
     "note_save":  "content",

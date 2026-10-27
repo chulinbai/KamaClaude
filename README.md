@@ -1,5 +1,8 @@
 # KamaClaude
 
+支持在问答中直接提供图片路径，以及分析 MCP 返回的图片。
+用法、模型要求和缓存说明见 [图片路径使用](docs/image-paths.md)。
+
 > 如果你还没有用过Codex、Claude code 这样的Agent，强烈建议用一用： [国内充值ChatGPT PLus、Pro 的方法](https://github.com/youngyangyang04/gpt-daichong)
 
 我最近在公众号「卡码大模型」上，更新了很多关于 Agent、codex、Claude工作原理的文章。

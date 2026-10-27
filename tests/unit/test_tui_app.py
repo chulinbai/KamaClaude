@@ -27,6 +27,32 @@ def test_param_summary_prefers_key_fields() -> None:
     assert _param_summary("note_save", {"content": "Python 3.12"}) == "content='Python 3.12'"
 
 
+# 功能：图片路径与缓存 ID 在工具卡片中展示，完成后保留格式和尺寸摘要
+# 设计：回放真实格式的开始和结束事件，检查卡片内容而不依赖终端图片绘制
+def test_image_tool_event_rendering() -> None:
+    assert "中文" in _param_summary("read_image", {"path": "中文 image.png"})
+    assert "image_id" in _param_summary("read_image", {"image_id": "a" * 64})
+    app = KamaTuiApp("127.0.0.1", 9999)
+    app._session_id = "s"
+    app._session_run_ids.add("r")
+    widgets = []
+    app._append = widgets.append
+    app._handle_event({
+        "type": "tool.call_started", "tool_use_id": "image", "tool_name": "read_image",
+        "params": {"path": "中文 image.png"}, "run_id": "r", "ts": "t",
+    })
+    summary = "Image abc: 中文 image.png (image/png, 32×24, 96 bytes)"
+    app._handle_event({
+        "type": "tool.call_finished", "tool_use_id": "image", "tool_name": "read_image",
+        "output": summary, "elapsed_ms": 1, "run_id": "r", "ts": "t",
+    })
+    block = widgets[0]
+    assert isinstance(block, ToolCallBlock)
+    assert block._finished
+    assert block._output == summary
+    assert "base64" not in block._output
+
+
 # 功能：验证 llm.token 事件累积到 LLMStreamBlock，不连续 token 各自新开一块
 # 设计：monkey-patch _append 收集追加的 widgets，断言 token 追加到同一块；
 #       发送非 token 事件后新 block 被重置，下一个 token 开启新块

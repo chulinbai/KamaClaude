@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from kama_claude.core.mcp.client import McpClient, McpServerUnavailableError, McpToolDef
+from kama_claude.core.mcp.client import (
+    McpCallResult,
+    McpClient,
+    McpServerUnavailableError,
+    McpToolDef,
+)
 from kama_claude.core.mcp.tool import McpTool
 
 
@@ -23,11 +28,13 @@ def _make_tool(
 
 
 # 功能：McpTool.invoke 应调用 client.call_tool 并将返回值封装为 ToolResult
-# 设计：mock client.call_tool 返回固定字符串，验证 ToolResult.content 一致
+# 设计：mock client.call_tool 返回结构化文本，验证旧的文字摘要仍然一致
 @pytest.mark.asyncio
 async def test_invoke_calls_mcp_client() -> None:
     tool, client = _make_tool()
-    client.call_tool = AsyncMock(return_value="file content here")
+    client.call_tool = AsyncMock(return_value=McpCallResult(
+        content=[{"type": "text", "text": "file content here"}],
+    ))
     result = await tool.invoke({"path": "/tmp/test.txt"})
     assert not result.is_error
     assert result.content == "file content here"

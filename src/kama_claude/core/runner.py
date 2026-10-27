@@ -17,7 +17,9 @@ from kama_claude.core.config import KamaConfig
 from kama_claude.core.context import ExecutionContext
 from kama_claude.core.events.bus import EventBus, EventHandler
 from kama_claude.core.events.writer import EventWriter
+from kama_claude.core.images import ImageStore
 from kama_claude.core.llm.base import LLMProvider
+from kama_claude.core.llm.images import ImageProvider
 from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.loop import AgentLoop
 from kama_claude.core.mcp.server import McpServerManager
@@ -43,6 +45,7 @@ from kama_claude.core.tools.builtin import (
     ListDirTool,
     NoteSaveTool,
     ReadFileTool,
+    ReadImageTool,
     TaskCreateTool,
     TaskGetTool,
     TaskListTool,
@@ -115,6 +118,7 @@ class AgentRunner:
         context: ExecutionContext | None = None,
         workspace: Path | None = None,
         access: PathAccessController | None = None,
+        images: ImageStore | None = None,
     ) -> ToolRegistry:
         allowed = set(tool_whitelist) if tool_whitelist else None
 
@@ -134,8 +138,13 @@ class AgentRunner:
             ),
         )
         registry = ToolRegistry()
+        images = images or ImageStore(
+            (store.session_dir(session.id) if store and session
+             else self._runs_dir / (run_id or "standalone")) / "images"
+        )
         tools = [
             ReadFileTool(access),
+            ReadImageTool(images, access),
             BashTool(windows=self._config.sandbox.windows, access=access),
             WriteFileTool(access),
             ListDirTool(access),
@@ -158,7 +167,9 @@ class AgentRunner:
 
             # 子执行捕获工作目录与服务，但不捕获父运行的局部事件总线
             async def execute_child(child: ExecutionContext) -> None:
-                await self.run_context(child, workspace=workspace, runs_dir=runs_dir, access=access)
+                await self.run_context(
+                    child, workspace=workspace, runs_dir=runs_dir, access=access, images=images,
+                )
 
             coordination = [
                 SpawnAgentTool(
@@ -186,7 +197,7 @@ class AgentRunner:
         if self._mcp_manager is not None:
             for tool in self._mcp_manager.get_tools():
                 if permitted(tool.name):
-                    registry.register(tool)
+                    registry.register(tool.with_images(images))
         return registry
 
     # 独立 one-shot 入口结束时也清理后台子任务
@@ -260,9 +271,13 @@ class AgentRunner:
         tool_whitelist: list[str] | None = None,
         access: PathAccessController | None = None,
         parent_run_id: str | None = None,
+        images: ImageStore | None = None,
     ) -> None:
         agent = context.agent_context
         run_path = runs_dir / context.run_id
+        images = images or ImageStore(
+            (store.session_dir(session.id) if store and session else run_path) / "images"
+        )
         runtime = self._task_registry.agents[agent.agent_id]
         bus = EventBus(
             session_id=agent.session_id,
@@ -296,7 +311,7 @@ class AgentRunner:
                     )
                 if self._provider is None:
                     self._provider = AnthropicProvider(self._config.llm.default_model)
-                provider: LLMProvider = self._provider
+                provider: LLMProvider = ImageProvider(self._provider, images)
                 if self._trace is not None:
                     provider = TracingProvider(
                         provider,
@@ -317,6 +332,7 @@ class AgentRunner:
                     context=context,
                     workspace=workspace,
                     access=access,
+                    images=images,
                 )
                 compactor = Compactor(
                     bus,

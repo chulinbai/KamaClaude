@@ -127,6 +127,8 @@ class PathAccessController:
 
     # 从内置文件操作或 Shell 的明确声明中提取待检查路径
     def requirements(self, tool_name: str, params: dict[str, object]) -> tuple[PathGrant, ...]:
+        if tool_name == "read_image" and params.get("image_id") is not None:
+            return ()
         if tool_name == "bash":
             raw = params.get("required_paths", [])
             if not isinstance(raw, list):
@@ -149,7 +151,7 @@ class PathAccessController:
         write = tool_name in ("write_file", "create_dir")
         directory = tool_name in ("list_dir", "create_dir")
         operation: Literal["read", "list", "write", "create_dir", "shell"] = {
-            "read_file": "read", "write_file": "write", "list_dir": "list",
+            "read_file": "read", "read_image": "read", "write_file": "write", "list_dir": "list",
             "create_dir": "create_dir",
         }[tool_name]  # type: ignore[assignment]
         return (self.request(str(params.get("path", ".")), "write" if write else "read",

@@ -16,6 +16,7 @@ from kama_claude.core.bus.events import (
     ToolCallStartedEvent,
 )
 from kama_claude.core.events.bus import EventBus
+from kama_claude.core.images import ImageError, check_image_budget
 from kama_claude.core.llm.types import ToolCallBlock
 from kama_claude.core.permissions.paths import PathAccessError, PathGrant, path_execution
 from kama_claude.core.sandbox.errors import SandboxError
@@ -72,6 +73,7 @@ async def invoke_tool(
     *,
     permission_manager: PermissionManager | None = None,
     session_id: str = "",
+    image_history: list[dict[str, Any]] | None = None,
 ) -> ToolResult:
     t0 = time.monotonic()
 
@@ -198,7 +200,16 @@ async def invoke_tool(
                 )
             ms = elapsed()
 
+            if result.content_blocks is not None:
+                check_image_budget([
+                    *(image_history or []), {"role": "user", "content": result.content_blocks},
+                ])
+
             if result.is_error:
+                if result.content_blocks is not None:
+                    await _fail(bus, run_id, tool_call, result.error_type or "runtime_error",
+                                result.content, ms, attempt=attempt)
+                    return result
                 error_class = result.error_type or "runtime_error"
                 error_message = result.content
             else:
@@ -214,6 +225,8 @@ async def invoke_tool(
                 )
                 return result
 
+        except ImageError as exc:
+            return await _fail(bus, run_id, tool_call, "image_error", str(exc), elapsed())
         except RateLimitedError as exc:
             error_class = "rate_limited"
             error_message = str(exc)

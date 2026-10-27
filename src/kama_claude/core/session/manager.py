@@ -376,12 +376,15 @@ class SessionManager:
         async with lock:
             from kama_claude.core.bus.commands import SessionCompactResult
             from kama_claude.core.compact.compactor import Compactor
+            from kama_claude.core.images import ImageStore
+            from kama_claude.core.llm.images import ImageProvider
             agent = self.agent_registry(sid).ensure_main().context
             self._store.save_agent(agent, "compact")
             messages = agent.messages
             session_dir = self._store.session_dir(sid)
             compactor = Compactor(self._bus, session_dir, sid)
-            result = await compactor.compact_messages(messages, self._provider, focus=focus)
+            provider = ImageProvider(self._provider, ImageStore(session_dir / "images"))
+            result = await compactor.compact_messages(messages, provider, focus=focus)
             if result is None:
                 raise HandlerError(-32021, "compaction failed or not beneficial")
             agent.messages = [

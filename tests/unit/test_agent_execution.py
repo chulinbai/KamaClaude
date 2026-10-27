@@ -328,7 +328,9 @@ async def test_shared_mcp_cancellation_and_late_response(monkeypatch: pytest.Mon
                 + "\n"
             ).encode()
         )
-    assert await asyncio.wait_for(second, 2) == "second result"
+    assert (await asyncio.wait_for(second, 2)).content == [
+        {"type": "text", "text": "second result"},
+    ]
     assert not client._lock.locked()
 
 

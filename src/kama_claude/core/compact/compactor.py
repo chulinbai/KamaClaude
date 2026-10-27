@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from kama_claude.core.bus.events import ContextCompactedEvent
 from kama_claude.core.events.bus import EventBus
+from kama_claude.core.images import ImageReference, image_references
 
 if TYPE_CHECKING:
     from kama_claude.core.context import ExecutionContext
@@ -110,11 +111,11 @@ class Compactor:
     ) -> CompactionResult | None:
         from kama_claude.core.events.bus import EventBus as _Bus
 
-        original_estimate = sum(
-            len(str(m.get("content", ""))) for m in messages
-        ) // 4  # 粗略 token 估算（字符数 / 4）
-
         history_text = _messages_to_text(messages)
+        refs = {ref.image_id: ref for ref in image_references(messages)}
+        original_estimate = len(history_text) // 4 + sum(
+            ((ref.width + 27) // 28) * ((ref.height + 27) // 28) for ref in refs.values()
+        )  # 图片按尺寸粗估，不将编码数据算作文本
         prompt = _COMPACT_PROMPT
         if focus.strip():
             prompt += f"\n\nIMPORTANT: Pay special attention to: {focus.strip()}"
@@ -122,6 +123,14 @@ class Compactor:
         compress_request: list[dict[str, object]] = [
             {"role": "user", "content": f"{prompt}\n\n---\n\n{history_text}"}
         ]
+        if refs:
+            blocks: list[dict[str, Any]] = [{
+                "type": "text", "text": f"{prompt}\n\n---\n\n{history_text}\n\n"
+                "Describe the important visual findings below in the summary.",
+            }]
+            for ref in refs.values():
+                blocks.extend([{"type": "text", "text": ref.summary()}, ref.model_dump()])
+            compress_request[0]["content"] = blocks
 
         try:
             silent_bus = _Bus()
@@ -141,6 +150,10 @@ class Compactor:
         if not summary_text:
             logger.warning("compactor: LLM returned empty summary, skipping compaction")
             return None
+
+        if refs:
+            summary_text += "\n\n## Cached images\nUse read_image(image_id=...) to revisit.\n"
+            summary_text += "\n".join(ref.summary() for ref in refs.values())
 
         summary_tokens = response.usage.output_tokens if response.usage else len(summary_text) // 4
 
@@ -174,15 +187,20 @@ def _messages_to_text(messages: list[dict[str, Any]]) -> str:
                 btype = block.get("type", "")
                 if btype == "text":
                     blocks.append(block.get("text", ""))
+                elif btype == "image_ref":
+                    blocks.append(ImageReference.model_validate(block).summary())
                 elif btype == "tool_use":
                     blocks.append(
                         f"<tool_call name={block.get('name')} id={block.get('id')}>\n"
                         f"{block.get('input', {})}\n</tool_call>"
                     )
                 elif btype == "tool_result":
+                    value = block.get("content", "")
+                    text = _messages_to_text([{"content": value}]) if isinstance(value, list) \
+                        else str(value)
                     blocks.append(
                         f"<tool_result id={block.get('tool_use_id')}>\n"
-                        f"{block.get('content', '')}\n</tool_result>"
+                        f"{text}\n</tool_result>"
                     )
             parts.append(f"[{role}]\n" + "\n".join(blocks))
     return "\n\n".join(parts)

@@ -25,6 +25,12 @@ class McpToolDef:
     input_schema: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class McpCallResult:
+    content: list[dict[str, Any]] = field(default_factory=list)
+    is_error: bool = False
+
+
 # 通过 stdio 或 TCP 与 MCP server 通信的 JSON-RPC 2.0 客户端
 class McpClient:
     def __init__(self) -> None:
@@ -92,14 +98,13 @@ class McpClient:
             ))
         return tools
 
-    # 调用 MCP 工具并拼接文本，分别报告连接不可用与工具执行错误
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+    # 保留 MCP 内容顺序和工具执行错误标记，不丢弃图片
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> McpCallResult:
         response = await self._call("tools/call", {"name": name, "arguments": arguments})
-        parts: list[str] = []
-        for item in response.get("content", []):
-            if item.get("type") == "text":
-                parts.append(str(item["text"]))
-        return "\n".join(parts)
+        content = response.get("content", [])
+        if not isinstance(content, list) or not all(isinstance(item, dict) for item in content):
+            raise McpToolError("Invalid MCP content list")
+        return McpCallResult(content=content, is_error=bool(response.get("isError", False)))
 
     # 后台任务：持续读取 stderr 并记录日志，防止管道缓冲区满
     async def _drain_stderr(self) -> None:

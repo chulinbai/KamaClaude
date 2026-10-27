@@ -1,0 +1,5 @@
+[[mcp.servers]]
+name = "playwright"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@playwright/mcp@latest"]

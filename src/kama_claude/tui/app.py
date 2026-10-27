@@ -43,6 +43,7 @@ def _params_str(params: dict[str, Any]) -> str:
 def _param_summary(tool_name: str, params: dict[str, Any], max_len: int = 72) -> str:
     keys_by_tool = {
         "read_file": ("path",),
+        "read_image": ("path", "image_id"),
         "write_file": ("path",),
         "list_dir": ("path", "max_depth"),
         "bash": ("command",),

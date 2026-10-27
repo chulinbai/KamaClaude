@@ -23,6 +23,16 @@ def truncate_tool_results(
             continue
         new_blocks = []
         for block in content:
+            if block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+                nested = []
+                for part in block["content"]:
+                    if part.get("type") == "text" and len(part.get("text", "")) > limit:
+                        text = part["text"]
+                        omitted = len(text) - keep
+                        part = {**part, "text": text[:keep] +
+                                f"\n[... {omitted} chars omitted. Full output in run events.]"}
+                    nested.append(part)
+                block = {**block, "content": nested}
             if block.get("type") == "tool_result" and isinstance(block.get("content"), str):
                 text = block["content"]
                 if len(text) > limit:

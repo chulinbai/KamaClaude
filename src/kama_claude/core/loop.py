@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from kama_claude.core.bus.events import StepFinishedEvent, StepStartedEvent
 from kama_claude.core.context import ExecutionContext
 from kama_claude.core.events.bus import EventBus
+from kama_claude.core.images import ImageError
 from kama_claude.core.llm.base import LLMProvider
 from kama_claude.core.tools.invocation import invoke_tool
 from kama_claude.core.tools.registry import ToolRegistry
@@ -65,6 +66,10 @@ class AgentLoop:
                     system=context.system_prompt(
                         "You are a helpful AI assistant. "
                         "Use the available tools to complete the user's goal. "
+                        "When asked about an image path, use read_image to view it, not read_file. "
+                        "Never claim to have seen an image unless a tool returned its image data. "
+                        "Use image_id to revisit session snapshots. For MCP path inputs follow "
+                        "the tool schema; a remote server must have access to that same path. "
                         "When the goal is fully achieved, respond with a final answer "
                         "and do not call any more tools."
                     ),
@@ -72,6 +77,14 @@ class AgentLoop:
             except asyncio.CancelledError:
                 context.mark_failed("cancelled")
                 raise
+            except ImageError as exc:
+                from kama_claude.core.bus.events import LogLineEvent
+                await self._bus.publish(LogLineEvent(
+                    run_id=context.run_id, level="ERROR", source="images", message=str(exc),
+                    ts=_now(),
+                ))
+                context.mark_failed("image_error")
+                break
             except Exception:
                 logging.getLogger(__name__).exception(
                     "LLM call failed run_id=%s step=%d", context.run_id, context.step
@@ -97,8 +110,12 @@ class AgentLoop:
                         self._registry, tc, self._bus, context.run_id,
                         permission_manager=self._permission_manager,
                         session_id=self._session_id,
+                        image_history=context.messages,
                     )
-                    context.add_tool_result(tc.id, result.content, is_error=result.is_error)
+                    context.add_tool_result(
+                        tc.id, result.content_blocks if result.content_blocks is not None
+                        else result.content, is_error=result.is_error,
+                    )
             elif response.stop_reason == "max_tokens" and response.tool_calls:
                 # Output token limit hit mid-tool-call; input is incomplete.
                 # Add synthetic error results so the conversation stays balanced.

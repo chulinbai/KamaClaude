@@ -36,6 +36,7 @@ class _PendingRequest:
     tool_use_id: str
     paths: tuple[PathGrant, ...]
     workspace: str
+    history_workspaces: tuple[str | None, ...] = ()
 
 
 # 管理工具调用权限：策略评估、用户审批挂起、session 级和持久化 always 缓存、超时
@@ -61,6 +62,11 @@ class PermissionManager:
         self._timeout_s = timeout_s
         self._path_grants: dict[tuple[str, str], tuple[PathGrant, ...]] = {}
         self._closed_sessions: set[str] = set()
+        self._history_grants: dict[tuple[str, str], frozenset[str | None]] = {}
+
+    # 历史范围授权与普通路径读写授权分开保存
+    def history_grants(self, session_id: str, workspace: str) -> frozenset[str | None]:
+        return self._history_grants.get((session_id, workspace), frozenset())
 
     # 对工具名 + 参数执行 4 层静态评估，不挂起
     def evaluate(self, tool_name: str, params: dict[str, Any]) -> PermissionDecision:
@@ -97,6 +103,7 @@ class PermissionManager:
         *,
         paths: tuple[PathGrant, ...] = (),
         workspace: str = "",
+        history_workspaces: tuple[str | None, ...] = (),
     ) -> tuple[bool, str]:
         if self.is_closed(session_id):
             return False, "auto_deny"
@@ -111,7 +118,7 @@ class PermissionManager:
         if command and policy and any(re.search(pat, command) for pat in policy.deny_patterns):
             return False, "auto_deny"
         outside_cwd = bool(command and matches_outside_cwd(command))
-        if not paths and not outside_cwd:
+        if not paths and not outside_cwd and not history_workspaces:
             if cached == "allow":
                 return True, "auto_allow"
             if command and policy and any(re.search(pat, command) for pat in policy.allow_patterns):
@@ -121,7 +128,9 @@ class PermissionManager:
 
         request_id = uuid4().hex
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        req = _PendingRequest(future, session_id, tool_name, tool_use_id, paths, workspace)
+        req = _PendingRequest(
+            future, session_id, tool_name, tool_use_id, paths, workspace, history_workspaces,
+        )
         self._pending[request_id] = req
         try:
             await event_emitter({
@@ -129,8 +138,10 @@ class PermissionManager:
                 "tool_use_id": tool_use_id, "tool_name": tool_name, "params": params,
                 "param_preview": param_preview(tool_name, params), "session_id": session_id,
                 "paths": [path.model_dump() for path in paths], "workspace": workspace,
+                "history_workspaces": list(history_workspaces),
                 "allowed_decisions": list(self._decisions(req)), "ts": _now(),
-                "reason": "outside_allowed_paths" if paths else "tool_policy",
+                "reason": "history_scope" if history_workspaces else
+                "outside_allowed_paths" if paths else "tool_policy",
             })
             if self._timeout_s > 0:
                 raw = await asyncio.wait_for(future, timeout=self._timeout_s)
@@ -138,6 +149,13 @@ class PermissionManager:
                 raw = await future
             if self.is_closed(session_id):
                 return False, "deny_once"
+            if history_workspaces:
+                if raw == "allow_session":
+                    key = (session_id, workspace)
+                    self._history_grants[key] = self.history_grants(*key) | frozenset(
+                        history_workspaces,
+                    )
+                return raw in ("allow_once", "allow_session"), raw
             if paths:
                 if raw == "allow_session":
                     key = (session_id, workspace)
@@ -157,7 +175,7 @@ class PermissionManager:
     # 路径审批仅允许单次或当前会话授权，保留普通工具原有选项
     @staticmethod
     def _decisions(req: _PendingRequest) -> tuple[str, ...]:
-        if req.paths:
+        if req.paths or req.history_workspaces:
             return ("allow_once", "allow_session", "deny_once")
         return ("allow_once", "always_allow", "deny_once", "always_deny")
 
@@ -170,7 +188,8 @@ class PermissionManager:
             req = self._pending.get(request_id)
         else:
             candidates = [r for r in self._pending.values()
-                          if r.tool_use_id == tool_use_id and not r.paths]
+                          if r.tool_use_id == tool_use_id
+                          and not r.paths and not r.history_workspaces]
             req = candidates[0] if len(candidates) == 1 else None
         if (req is None or req.tool_use_id != tool_use_id or req.future.done()
                 or self.is_closed(req.session_id) or decision not in self._decisions(req)
@@ -221,6 +240,9 @@ class PermissionManager:
     # 客户端断连时拒绝该 session 所有待审批请求，防止 Future 永久挂起
     def cancel_session(self, session_id: str, reason: str = "client_disconnected") -> None:
         self._closed_sessions.add(session_id)
+        self._history_grants = {
+            key: value for key, value in self._history_grants.items() if key[0] != session_id
+        }
         self._path_grants = {k: v for k, v in self._path_grants.items() if k[0] != session_id}
         self._session_always = {k: v for k, v in self._session_always.items() if k[0] != session_id}
         to_cancel = [

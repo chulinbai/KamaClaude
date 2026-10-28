@@ -48,10 +48,13 @@ class ChatPrinter:
             tool_use_id = str(event.get("tool_use_id", ""))
             print(f"[permission] {tool_name}  {param_preview}")
             paths = event.get("paths", [])
+            history_workspaces = event.get("history_workspaces", [])
+            for workspace in history_workspaces:
+                print(f"  History only: {workspace or '(unknown workspace)'}")
             for path in paths:
                 scope = "directory and subtree" if path["kind"] == "directory" else "exact file"
                 print(f"  {path['operation']} / {path['access']} / {scope}: {path['path']}")
-            print("  y=allow once  s=allow session  n=deny" if paths else
+            print("  y=allow once  s=allow session  n=deny" if paths or history_workspaces else
                   "  y=allow once  a=always allow  n=deny once  d=always deny")
             self.pending[str(event.get("request_id") or tool_use_id)] = event
         elif t in ("permission.granted", "permission.denied"):
@@ -71,7 +74,7 @@ async def _readline(prompt: str) -> str:
 
 
 # 异步核心：创建 chat session，循环读取用户输入并发送到 daemon；权限请求时优先处理审批
-async def _chat_async(config: KamaConfig) -> int:
+async def _chat_async(config: KamaConfig, *, max_steps: int | None = None) -> int:
     workspace = Path.cwd()
     client = SocketClient(config.host, config.port)
     try:
@@ -88,9 +91,10 @@ async def _chat_async(config: KamaConfig) -> int:
     # 发送消息时继续读取审批输入，避免同步等待 run 导致审批死锁
     async def send_message(session_id: str, content: str) -> None:
         try:
-            await client.send_command("session.send_message", {
-                "session_id": session_id, "content": content,
-            })
+            params: dict[str, Any] = {"session_id": session_id, "content": content}
+            if max_steps is not None:
+                params["max_steps"] = max_steps
+            await client.send_command("session.send_message", params)
         except (IpcError, RuntimeError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
 
@@ -122,7 +126,8 @@ async def _chat_async(config: KamaConfig) -> int:
             if printer.pending:
                 key, event = next(iter(printer.pending.items()))
                 decisions = ({"y": "allow_once", "s": "allow_session", "n": "deny_once"}
-                             if event.get("paths") else _DECISION_MAP)
+                             if event.get("paths") or event.get("history_workspaces")
+                             else _DECISION_MAP)
                 decision = decisions.get(content.lower())
                 if decision is None:
                     print("  allowed keys: " + ", ".join(decisions))
@@ -160,9 +165,9 @@ async def _chat_async(config: KamaConfig) -> int:
 
 
 # 执行 kama chat 命令
-def cmd_chat(config: KamaConfig) -> None:
+def cmd_chat(config: KamaConfig, *, max_steps: int | None = None) -> None:
     try:
-        exit_code = asyncio.run(_chat_async(config))
+        exit_code = asyncio.run(_chat_async(config, max_steps=max_steps))
     except KeyboardInterrupt:
         sys.exit(130)
     sys.exit(exit_code)

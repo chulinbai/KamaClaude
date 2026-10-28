@@ -29,6 +29,10 @@ class BaseTool(ABC):
     input_schema: dict[str, object]
     params_model: ClassVar[type[BaseModel] | None] = None
 
+    # 为需要动态范围授权的工具提供调用身份，普通工具无需预处理
+    async def prepare(self, params: dict[str, object], tool_use_id: str) -> None:
+        pass
+
     # 执行工具调用，返回结果或错误
     @abstractmethod
     async def invoke(self, params: dict[str, object]) -> ToolResult: ...

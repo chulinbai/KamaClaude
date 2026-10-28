@@ -81,6 +81,7 @@ class Compactor:
         if result is None:
             return None
 
+        context.agent_context.record_compaction(result.summary_text)
         context.messages = [
             {"role": "user", "content": result.summary_text},
             {"role": "assistant", "content": "Understood, I'll continue from this summary."},

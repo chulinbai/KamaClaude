@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Discriminator, Field
 
+from kama_claude.core.history.models import HistoryReadParams, HistorySearchParams
 from kama_claude.core.session.model import SessionMode, SessionStatus
 
 
@@ -22,6 +23,10 @@ class AgentRunCommand(BaseModel):
     type: Literal["agent.run"] = "agent.run"
     goal: str
     workspace: str | None = Field(default=None, min_length=1)
+    max_steps: int | None = Field(
+        default=None, ge=0, strict=True,
+        description="Per-run step limit: omitted/null uses Core config; 0 is unlimited.",
+    )
 
 
 class AgentRunResult(BaseModel):
@@ -89,6 +94,10 @@ class SessionSendMessageCommand(BaseModel):
     type: Literal["session.send_message"] = "session.send_message"
     session_id: str
     content: str
+    max_steps: int | None = Field(
+        default=None, ge=0, strict=True,
+        description="Per-message run step limit: omitted/null uses Core config; 0 is unlimited.",
+    )
 
 
 class SessionSendMessageResult(BaseModel):
@@ -171,6 +180,28 @@ class SubagentDataResult(BaseModel):
     data: dict[str, Any]
 
 
+class HistorySearchCommand(HistorySearchParams):
+    type: Literal["history.search"] = "history.search"
+    workspace: str | None = Field(default=None, min_length=1)
+
+
+class HistoryReadCommand(HistoryReadParams):
+    type: Literal["history.read"] = "history.read"
+    workspace: str | None = Field(default=None, min_length=1)
+
+
+class HistoryStatusCommand(BaseModel):
+    type: Literal["history.status"] = "history.status"
+    workspace: str | None = Field(default=None, min_length=1)
+    scope: Literal["workspace", "all"] = "workspace"
+
+
+class HistoryReindexCommand(BaseModel):
+    type: Literal["history.reindex"] = "history.reindex"
+    workspace: str | None = Field(default=None, min_length=1)
+    scope: Literal["workspace", "all"] = "workspace"
+
+
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
@@ -187,6 +218,10 @@ Command = Annotated[
     | SubagentListCommand
     | SubagentResultCommand
     | SubagentSendInputCommand
-    | SubagentCloseCommand,
+    | SubagentCloseCommand
+    | HistorySearchCommand
+    | HistoryReadCommand
+    | HistoryStatusCommand
+    | HistoryReindexCommand,
     Discriminator("type"),
 ]

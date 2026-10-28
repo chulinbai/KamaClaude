@@ -171,6 +171,7 @@ class PermissionRequestedEvent(AgentEvent):
     workspace: str = ""
     reason: str = "tool_policy"
     paths: list[PathGrant] = Field(default_factory=list)
+    history_workspaces: list[str | None] = Field(default_factory=list)
     allowed_decisions: list[str] = Field(default_factory=lambda: [
         "allow_once", "always_allow", "deny_once", "always_deny",
     ])

@@ -20,6 +20,7 @@ from kama_claude.core.bus.events import (
     SkillInvokedEvent,
 )
 from kama_claude.core.events.bus import EventBus
+from kama_claude.core.limits import normalize_max_steps
 from kama_claude.core.runs import new_run_id
 from kama_claude.core.sandbox.errors import SandboxPolicyError
 from kama_claude.core.sandbox.policy import normalize_path
@@ -93,7 +94,8 @@ class SessionManager:
             raise HandlerError(SESSION_CLOSED, "session already closed")
         if sid not in self._registries:
             registry = AgentRegistry(sid, self._bus)
-            registry.ensure_main(self._store.read_messages(sid))
+            main = registry.ensure_main(self._store.read_messages(sid))
+            main.context.archive = self._store.history(sid)
             self._registries[sid] = registry
         return self._registries[sid]
 
@@ -260,7 +262,10 @@ class SessionManager:
         return session
 
     # 处理用户消息，追加 thread 并启动一次 agent run
-    async def send_message(self, sid: str, content: str, *, run_id: str | None = None) -> str:
+    async def send_message(
+        self, sid: str, content: str, *, run_id: str | None = None, max_steps: int | None = None,
+    ) -> str:
+        normalize_max_steps(max_steps)
         self._check_accepting()
         session = self._get_session(sid)
         lock = self._locks[sid]
@@ -276,7 +281,9 @@ class SessionManager:
 
             run_id = run_id or new_run_id()
             session.status = "active"
+            await asyncio.to_thread(self._store.history, sid)
             agents = self.agent_registry(sid)
+            agents.ensure_main().context.history_run_id = run_id
             self._store.save_agent(agents.ensure_main().context, run_id)
             await agents.prepare_input(content)
             self._store.save_agent(agents.ensure_main().context, run_id)
@@ -331,6 +338,7 @@ class SessionManager:
                     store=self._store,
                     system_prompt_override=system_prompt_override,
                     tool_whitelist=tool_whitelist,
+                    max_steps=max_steps,
                 )
             finally:
                 if session.mode == "one_shot":
@@ -378,6 +386,7 @@ class SessionManager:
             from kama_claude.core.compact.compactor import Compactor
             from kama_claude.core.images import ImageStore
             from kama_claude.core.llm.images import ImageProvider
+            await asyncio.to_thread(self._store.history, sid)
             agent = self.agent_registry(sid).ensure_main().context
             self._store.save_agent(agent, "compact")
             messages = agent.messages
@@ -387,6 +396,8 @@ class SessionManager:
             result = await compactor.compact_messages(messages, provider, focus=focus)
             if result is None:
                 raise HandlerError(-32021, "compaction failed or not beneficial")
+            agent.history_run_id = "compact"
+            agent.record_compaction(result.summary_text)
             agent.messages = [
                 {"role": "user", "content": result.summary_text},
                 {"role": "assistant", "content": "Understood, I'll continue from this summary."},

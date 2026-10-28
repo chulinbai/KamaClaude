@@ -137,7 +137,7 @@ class AgentLoop:
                 if not more_input and not context.is_done():
                     context.result = response.text or ""
                     context.mark_success()
-            elif context.step >= context.max_steps:
+            elif not context.has_steps_remaining():
                 context.mark_failed("exceeded_max_steps")
 
             if not context.is_done() and context.registry is not None:

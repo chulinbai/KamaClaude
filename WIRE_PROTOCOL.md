@@ -109,6 +109,7 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | `type` | `string` | no |
 | `goal` | `string` | yes |
 | `workspace` | `string \| null` | no |
+| `max_steps` | `integer \| null` | no |
 
 ```json
 {
@@ -135,6 +136,20 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       ],
       "default": null,
       "title": "Workspace"
+    },
+    "max_steps": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Per-run step limit: omitted/null uses Core config; 0 is unlimited.",
+      "title": "Max Steps"
     }
   },
   "required": [
@@ -653,6 +668,7 @@ Reopens a persisted chat session without starting a run or replaying history. An
 | `type` | `string` | no |
 | `session_id` | `string` | yes |
 | `content` | `string` | yes |
+| `max_steps` | `integer \| null` | no |
 
 ```json
 {
@@ -670,6 +686,20 @@ Reopens a persisted chat session without starting a run or replaying history. An
     "content": {
       "title": "Content",
       "type": "string"
+    },
+    "max_steps": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Per-message run step limit: omitted/null uses Core config; 0 is unlimited.",
+      "title": "Max Steps"
     }
   },
   "required": [
@@ -780,6 +810,668 @@ Reopens a persisted chat session without starting a run or replaying history. An
     "messages"
   ],
   "title": "SessionGetHistoryResult",
+  "type": "object"
+}
+```
+
+## History retrieval
+
+History commands do not create chat sessions or call a model. workspace defaults to the daemon startup directory. scope=all requires separate history-scope approval; a CLI connection owns its temporary authorization. record_id is not an access grant. complete reports search coverage; truncated reports result limits. Read pagination uses offset/next_offset with the same record_id, before and after. Errors: -32030 storage unavailable; -32031 permission denied; -32032 missing record; -32033 read timeout; -32602 invalid parameters.
+
+### history.search
+
+| Field | Type | Required |
+|---|---|---|
+| `query` | `string` | yes |
+| `scope` | `string` | no |
+| `target_session_id` | `string \| null` | no |
+| `since` | `string \| null` | no |
+| `until` | `string \| null` | no |
+| `limit` | `integer \| null` | no |
+| `type` | `string` | no |
+| `workspace` | `string \| null` | no |
+
+```json
+{
+  "properties": {
+    "query": {
+      "maxLength": 2048,
+      "minLength": 1,
+      "title": "Query",
+      "type": "string"
+    },
+    "scope": {
+      "default": "workspace",
+      "enum": [
+        "workspace",
+        "all"
+      ],
+      "title": "Scope",
+      "type": "string"
+    },
+    "target_session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Session Id"
+    },
+    "since": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Since"
+    },
+    "until": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Until"
+    },
+    "limit": {
+      "anyOf": [
+        {
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Limit"
+    },
+    "type": {
+      "const": "history.search",
+      "default": "history.search",
+      "title": "Type",
+      "type": "string"
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "title": "HistorySearchCommand",
+  "type": "object"
+}
+```
+### HistorySearchResult
+
+| Field | Type | Required |
+|---|---|---|
+| `results` | `array` | no |
+| `backend` | `string` | no |
+| `complete` | `boolean` | no |
+| `truncated` | `boolean` | no |
+| `reason` | `string \| null` | no |
+| `searched_sessions` | `integer` | no |
+| `total_candidate_sessions` | `integer` | no |
+| `warnings` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "HistoryHit": {
+      "properties": {
+        "record_id": {
+          "title": "Record Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Workspace"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Run Id"
+        },
+        "sequence": {
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "timestamp": {
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "user_message",
+            "assistant_message",
+            "tool_result",
+            "note_snapshot",
+            "compaction_summary"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "excerpt": {
+          "title": "Excerpt",
+          "type": "string"
+        },
+        "source": {
+          "additionalProperties": true,
+          "title": "Source",
+          "type": "object"
+        }
+      },
+      "required": [
+        "record_id",
+        "session_id",
+        "title",
+        "workspace",
+        "run_id",
+        "sequence",
+        "timestamp",
+        "kind",
+        "excerpt"
+      ],
+      "title": "HistoryHit",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "results": {
+      "items": {
+        "$ref": "#/$defs/HistoryHit"
+      },
+      "title": "Results",
+      "type": "array"
+    },
+    "backend": {
+      "default": "scan",
+      "title": "Backend",
+      "type": "string"
+    },
+    "complete": {
+      "default": true,
+      "title": "Complete",
+      "type": "boolean"
+    },
+    "truncated": {
+      "default": false,
+      "title": "Truncated",
+      "type": "boolean"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "searched_sessions": {
+      "default": 0,
+      "title": "Searched Sessions",
+      "type": "integer"
+    },
+    "total_candidate_sessions": {
+      "default": 0,
+      "title": "Total Candidate Sessions",
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "title": "HistorySearchResult",
+  "type": "object"
+}
+```
+### history.read
+
+| Field | Type | Required |
+|---|---|---|
+| `record_id` | `string` | yes |
+| `scope` | `string` | no |
+| `before` | `integer` | no |
+| `after` | `integer` | no |
+| `offset` | `integer` | no |
+| `type` | `string` | no |
+| `workspace` | `string \| null` | no |
+
+```json
+{
+  "properties": {
+    "record_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Record Id",
+      "type": "string"
+    },
+    "scope": {
+      "default": "workspace",
+      "enum": [
+        "workspace",
+        "all"
+      ],
+      "title": "Scope",
+      "type": "string"
+    },
+    "before": {
+      "default": 2,
+      "maximum": 20,
+      "minimum": 0,
+      "title": "Before",
+      "type": "integer"
+    },
+    "after": {
+      "default": 2,
+      "maximum": 20,
+      "minimum": 0,
+      "title": "After",
+      "type": "integer"
+    },
+    "offset": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Offset",
+      "type": "integer"
+    },
+    "type": {
+      "const": "history.read",
+      "default": "history.read",
+      "title": "Type",
+      "type": "string"
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace"
+    }
+  },
+  "required": [
+    "record_id"
+  ],
+  "title": "HistoryReadCommand",
+  "type": "object"
+}
+```
+### HistoryReadResult
+
+| Field | Type | Required |
+|---|---|---|
+| `records` | `array` | yes |
+| `text` | `string` | yes |
+| `next_offset` | `integer \| null` | no |
+| `complete` | `boolean` | no |
+| `warnings` | `array` | no |
+
+```json
+{
+  "$defs": {
+    "HistoryHit": {
+      "properties": {
+        "record_id": {
+          "title": "Record Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Workspace"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Run Id"
+        },
+        "sequence": {
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "timestamp": {
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "user_message",
+            "assistant_message",
+            "tool_result",
+            "note_snapshot",
+            "compaction_summary"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "excerpt": {
+          "title": "Excerpt",
+          "type": "string"
+        },
+        "source": {
+          "additionalProperties": true,
+          "title": "Source",
+          "type": "object"
+        }
+      },
+      "required": [
+        "record_id",
+        "session_id",
+        "title",
+        "workspace",
+        "run_id",
+        "sequence",
+        "timestamp",
+        "kind",
+        "excerpt"
+      ],
+      "title": "HistoryHit",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "records": {
+      "items": {
+        "$ref": "#/$defs/HistoryHit"
+      },
+      "title": "Records",
+      "type": "array"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "next_offset": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Offset"
+    },
+    "complete": {
+      "default": true,
+      "title": "Complete",
+      "type": "boolean"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "records",
+    "text"
+  ],
+  "title": "HistoryReadResult",
+  "type": "object"
+}
+```
+### history.status
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `workspace` | `string \| null` | no |
+| `scope` | `string` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "history.status",
+      "default": "history.status",
+      "title": "Type",
+      "type": "string"
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace"
+    },
+    "scope": {
+      "default": "workspace",
+      "enum": [
+        "workspace",
+        "all"
+      ],
+      "title": "Scope",
+      "type": "string"
+    }
+  },
+  "title": "HistoryStatusCommand",
+  "type": "object"
+}
+```
+### history.reindex
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `workspace` | `string \| null` | no |
+| `scope` | `string` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "history.reindex",
+      "default": "history.reindex",
+      "title": "Type",
+      "type": "string"
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace"
+    },
+    "scope": {
+      "default": "workspace",
+      "enum": [
+        "workspace",
+        "all"
+      ],
+      "title": "Scope",
+      "type": "string"
+    }
+  },
+  "title": "HistoryReindexCommand",
+  "type": "object"
+}
+```
+### HistoryStatusResult
+
+| Field | Type | Required |
+|---|---|---|
+| `state` | `string` | yes |
+| `sessions` | `integer` | yes |
+| `segments` | `integer` | yes |
+| `archive_bytes` | `integer` | yes |
+| `searchable_bytes` | `integer` | yes |
+| `oversized_segments` | `integer` | yes |
+| `indexed_segments_processed` | `integer` | yes |
+| `index_build_segments` | `integer` | yes |
+| `warnings` | `array` | yes |
+| `index_error` | `string \| null` | yes |
+
+```json
+{
+  "properties": {
+    "state": {
+      "enum": [
+        "SCAN",
+        "BUILDING_INDEX",
+        "INDEX_READY",
+        "INDEX_DEGRADED"
+      ],
+      "title": "State",
+      "type": "string"
+    },
+    "sessions": {
+      "title": "Sessions",
+      "type": "integer"
+    },
+    "segments": {
+      "title": "Segments",
+      "type": "integer"
+    },
+    "archive_bytes": {
+      "title": "Archive Bytes",
+      "type": "integer"
+    },
+    "searchable_bytes": {
+      "title": "Searchable Bytes",
+      "type": "integer"
+    },
+    "oversized_segments": {
+      "title": "Oversized Segments",
+      "type": "integer"
+    },
+    "indexed_segments_processed": {
+      "title": "Indexed Segments Processed",
+      "type": "integer"
+    },
+    "index_build_segments": {
+      "title": "Index Build Segments",
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "index_error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Index Error"
+    }
+  },
+  "required": [
+    "state",
+    "sessions",
+    "segments",
+    "archive_bytes",
+    "searchable_bytes",
+    "oversized_segments",
+    "indexed_segments_processed",
+    "index_build_segments",
+    "warnings",
+    "index_error"
+  ],
+  "title": "HistoryStatusResult",
   "type": "object"
 }
 ```
@@ -2193,6 +2885,7 @@ Each request has a unique request_id, even when tool_use_id repeats across runs.
 | `workspace` | `string` | no |
 | `reason` | `string` | no |
 | `paths` | `array` | no |
+| `history_workspaces` | `array` | no |
 | `allowed_decisions` | `array` | no |
 | `ts` | `string` | yes |
 
@@ -2327,6 +3020,20 @@ Each request has a unique request_id, even when tool_use_id repeats across runs.
         "$ref": "#/$defs/PathGrant"
       },
       "title": "Paths",
+      "type": "array"
+    },
+    "history_workspaces": {
+      "items": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "title": "History Workspaces",
       "type": "array"
     },
     "allowed_decisions": {

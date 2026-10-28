@@ -3,6 +3,12 @@
 支持在问答中直接提供图片路径，以及分析 MCP 返回的图片。
 用法、模型要求和缓存说明见 [图片路径使用](docs/image-paths.md)。
 
+Agent 默认不限执行步数；可使用 `kama-tui --max-steps 50` 设置每轮上限。
+CLI、配置优先级与子 Agent 继承规则见 [执行步数设置](docs/step-limits.md)。
+
+支持跨会话历史检索，原文独立归档并按大小分片，compact 后仍可查找旧记录。
+Agent 工具、CLI、范围审批及配置见 [历史检索](docs/history.md)。
+
 > 如果你还没有用过Codex、Claude code 这样的Agent，强烈建议用一用： [国内充值ChatGPT PLus、Pro 的方法](https://github.com/youngyangyang04/gpt-daichong)
 
 我最近在公众号「卡码大模型」上，更新了很多关于 Agent、codex、Claude工作原理的文章。

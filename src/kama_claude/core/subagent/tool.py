@@ -62,7 +62,7 @@ class SpawnAgentTool(CoordinationTool):
         parent_bus: EventBus,
         parent_run_id: str,
         permission_manager: PermissionManager | None,
-        max_steps: int,
+        max_steps: int | None,
         task_registry: AgentRegistry,
         runs_dir: Path,
         session_id: str,

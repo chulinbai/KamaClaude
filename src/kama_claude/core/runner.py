@@ -17,7 +17,10 @@ from kama_claude.core.config import KamaConfig
 from kama_claude.core.context import ExecutionContext
 from kama_claude.core.events.bus import EventBus, EventHandler
 from kama_claude.core.events.writer import EventWriter
+from kama_claude.core.history.service import HistoryService
+from kama_claude.core.history.tools import HistoryReadTool, HistorySearchTool
 from kama_claude.core.images import ImageStore
+from kama_claude.core.limits import normalize_max_steps
 from kama_claude.core.llm.base import LLMProvider
 from kama_claude.core.llm.images import ImageProvider
 from kama_claude.core.llm.provider import AnthropicProvider
@@ -82,6 +85,7 @@ class AgentRunner:
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
+        history_service: HistoryService | None = None,
     ) -> None:
         self._config = config
         self._bus = bus or EventBus()
@@ -91,6 +95,7 @@ class AgentRunner:
         self._trace = trace
         self._permission_manager = permission_manager
         self._mcp_manager = mcp_manager
+        self._history_service = history_service
         self._task_registry = AgentRegistry(bus=self._bus)
 
     @property
@@ -160,6 +165,13 @@ class AgentRunner:
         if session is not None and store is not None and run_id is not None:
             if permitted("note_save"):
                 registry.register(NoteSaveTool(store, session.id, run_id))
+            if self._history_service is not None and bus is not None:
+                for history_tool in (HistorySearchTool, HistoryReadTool):
+                    if permitted(history_tool.name):
+                        registry.register(history_tool(
+                            self._history_service, workspace, session.id, run_id,
+                            bus, self._permission_manager,
+                        ))
         if provider is not None and bus is not None and run_id is not None:
             runs_dir = child_runs_dir or self._runs_dir
             caller = context.agent_context.agent_id if context else "main"
@@ -177,7 +189,7 @@ class AgentRunner:
                     self._bus,
                     run_id,
                     self._permission_manager,
-                    self._config.agent.max_steps,
+                    context.max_steps if context is not None else self._config.agent.max_steps,
                     self._task_registry,
                     runs_dir,
                     session_id,
@@ -201,9 +213,11 @@ class AgentRunner:
         return registry
 
     # 独立 one-shot 入口结束时也清理后台子任务
-    async def run(self, goal: str, *, run_id: str | None = None) -> None:
+    async def run(
+        self, goal: str, *, run_id: str | None = None, max_steps: int | None = None,
+    ) -> None:
         try:
-            await self.run_and_capture(goal, run_id=run_id)
+            await self.run_and_capture(goal, run_id=run_id, max_steps=max_steps)
         finally:
             await self._task_registry.shutdown()
 
@@ -217,7 +231,11 @@ class AgentRunner:
         store: SessionStore | None = None,
         system_prompt_override: str | None = None,
         tool_whitelist: list[str] | None = None,
+        max_steps: int | None = None,
     ) -> RunOutcome:
+        limit = normalize_max_steps(
+            self._config.agent.max_steps if max_steps is None else max_steps
+        )
         run_id = run_id or new_run_id()
         sid = session.id if session else ""
         self._task_registry.session_id = sid
@@ -232,10 +250,13 @@ class AgentRunner:
             runtime = self._task_registry.agents["main"]
             if session is None:
                 runtime.context.messages.append({"role": "user", "content": goal})
+        if store is not None and session is not None:
+            runtime.context.archive = store.history(sid)
+            runtime.context.history_run_id = run_id
         context = ExecutionContext(
             run_id,
             goal,
-            self._config.agent.max_steps,
+            limit,
             agent_context=runtime.context,
             registry=self._task_registry,
             system_prompt_override=system_prompt_override,
@@ -357,7 +378,11 @@ class AgentRunner:
                 context.mark_failed("execution_error")
             finally:
                 runtime.accepting = False
-                context.repair_tool_results()
+                try:
+                    context.repair_tool_results()
+                except Exception as exc:
+                    context.mark_failed("persistence_error")
+                    persistence_error = exc
                 if session is not None and store is not None:
                     try:
                         store.save_agent(agent, context.run_id)

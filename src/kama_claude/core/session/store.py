@@ -4,12 +4,16 @@ import json
 import logging
 import re
 import shutil
+import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from kama_claude.core.context import AgentContext
+from kama_claude.core.history.archive import HistoryArchive
+from kama_claude.core.history.models import HistoryConfig
 from kama_claude.core.session.model import Session
 
 logger = logging.getLogger(__name__)
@@ -24,9 +28,33 @@ def _now() -> str:
 
 class SessionStore:
     # 初始化 session 文件存储根目录
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, history_config: HistoryConfig | None = None) -> None:
         self._root = root.expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
+        self.history_config = history_config or HistoryConfig()
+        self._archives: dict[str, HistoryArchive] = {}
+        self._archive_lock = threading.RLock()
+        self._history_imported: set[str] = set()
+
+    @property
+    # 返回受校验的会话存储根目录供历史服务复用
+    def root(self) -> Path:
+        return self._root
+
+    # 返回会话唯一归档实例，导入已有记录后才允许写入新历史
+    def history(self, sid: str, check: Callable[[], None] | None = None) -> HistoryArchive:
+        with self._archive_lock:
+            if sid not in self._archives:
+                self._archives[sid] = HistoryArchive(
+                    self.session_dir(sid), self.history_config.segment_max_bytes,
+                )
+            archive = self._archives[sid]
+            if sid in self._history_imported:
+                return archive
+        archive.import_legacy(check)
+        with self._archive_lock:
+            self._history_imported.add(sid)
+        return archive
 
     # 返回指定 session 的目录路径
     def session_dir(self, sid: str) -> Path:
@@ -75,9 +103,11 @@ class SessionStore:
         return session
 
     # 扫描有效会话元数据并按最近更新时间排序，损坏记录只记录日志
-    def list_meta(self) -> list[Session]:
+    def list_meta(self, check: Callable[[], None] | None = None) -> list[Session]:
         sessions = []
         for path in self._root.iterdir():
+            if check is not None:
+                check()
             if not path.is_dir():
                 continue
             try:
@@ -119,6 +149,7 @@ class SessionStore:
 
     # 提交主 agent 的新增历史，失败后改用完整替换避免部分追加重复
     def save_agent(self, agent: AgentContext, run_id: str) -> None:
+        agent.flush_history()
         try:
             if agent.history_replaced:
                 self.write_compacted(agent.session_id, agent.messages)
@@ -131,6 +162,8 @@ class SessionStore:
             raise
         agent.persisted_count = len(agent.messages)
         agent.history_replaced = False
+        if agent.archive is not None:
+            agent.archive.checkpoint()
 
     # 读取完整 thread 并返回可直接传给 Anthropic 的 messages
     def read_messages(self, sid: str) -> list[dict[str, Any]]:
@@ -220,6 +253,7 @@ class SessionStore:
 
     # 将一条主动笔记追加到 notes.md
     def append_note(self, sid: str, content: str, run_id: str) -> None:
+        self.history(sid).emit("note_snapshot", {"content": content}, run_id)
         path = self.session_dir(sid)
         path.mkdir(parents=True, exist_ok=True)
         with self._file(sid, "notes.md").open("a", encoding="utf-8") as f:

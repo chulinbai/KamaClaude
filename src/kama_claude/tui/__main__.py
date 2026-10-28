@@ -6,6 +6,7 @@ import logging.handlers
 import os
 from pathlib import Path
 
+from kama_claude.cli.arguments import parse_max_steps
 from kama_claude.core.config import get_config
 from kama_claude.tui.app import KamaTuiApp
 
@@ -35,6 +36,10 @@ def _setup_logging(level: str) -> None:
 def main() -> None:
     workspace = Path.cwd()
     parser = argparse.ArgumentParser(prog="kama-tui", description="KamaClaude TUI")
+    parser.add_argument(
+        "--max-steps", type=parse_max_steps, metavar="N",
+        help="Limit each message run to N model steps; 0 means unlimited (default: Core config)",
+    )
     history = parser.add_mutually_exclusive_group()
     history.add_argument(
         "--replay",
@@ -48,7 +53,7 @@ def main() -> None:
     _setup_logging(config.logging.level)
     app = KamaTuiApp(
         config.host, config.port, replay_run_id=args.replay, resume_session_id=args.resume,
-        workspace=workspace,
+        workspace=workspace, max_steps=args.max_steps,
     )
     app.run()
 

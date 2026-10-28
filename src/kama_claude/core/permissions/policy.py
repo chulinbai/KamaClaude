@@ -45,6 +45,10 @@ DEFAULT_POLICIES: dict[str, ToolPolicy] = {
     "read_image": ToolPolicy(default=PermissionDecision.ALLOW),
     "list_dir":   ToolPolicy(default=PermissionDecision.ALLOW),
     "note_save":  ToolPolicy(default=PermissionDecision.ALLOW),
+    "history_search": ToolPolicy(default=PermissionDecision.ALLOW),
+    "history_read": ToolPolicy(default=PermissionDecision.ALLOW),
+    "history_status": ToolPolicy(default=PermissionDecision.ALLOW),
+    "history_reindex": ToolPolicy(default=PermissionDecision.ALLOW),
 }
 
 # 未在 DEFAULT_POLICIES 中登记的工具的兜底策略

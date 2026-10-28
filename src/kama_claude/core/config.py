@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
+from kama_claude.core.history.models import HistoryConfig
+from kama_claude.core.limits import normalize_max_steps
 from kama_claude.core.sandbox.models import FileSystemPolicy, NetworkPolicy, WindowsSandboxConfig
 
 _DEFAULT_HOST = "127.0.0.1"
@@ -16,7 +19,6 @@ _DEFAULT_LOG_LEVEL = "INFO"
 _DEFAULT_LOG_FILE = "~/.kama/logs/core.log"
 _DEFAULT_LOG_FORMAT = "text"
 _DEFAULT_CONFIG_PATH = "~/.kama/config.toml"
-_DEFAULT_MAX_STEPS = 20
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 _DEFAULT_TRACE_FILE = "~/.kama/traces/daemon.jsonl"
 
@@ -30,7 +32,7 @@ class LoggingConfig:
 
 @dataclass
 class AgentConfig:
-    max_steps: int = _DEFAULT_MAX_STEPS
+    max_steps: int | None = None
 
 
 @dataclass
@@ -91,6 +93,7 @@ class KamaConfig:
     trace: TraceConfig = field(default_factory=TraceConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
+    history: HistoryConfig = field(default_factory=HistoryConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
@@ -129,9 +132,21 @@ def get_config() -> KamaConfig:
 def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
     unknown = set(data.keys()) - {
         "core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "sandbox",
+        "history",
     }
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
+
+    if "history" in data:
+        section = data["history"]
+        if not isinstance(section, dict) or set(section) - HistoryConfig.model_fields.keys():
+            raise SystemExit("Config error: unknown [history] keys or invalid table")
+        try:
+            config.history = HistoryConfig.model_validate(
+                {**config.history.model_dump(), **section},
+            )
+        except ValidationError as exc:
+            raise SystemExit(f"Config error: [history]: {exc}") from exc
 
     if "sandbox" in data:
         sandbox = data["sandbox"]
@@ -222,10 +237,10 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
         if unknown_agent:
             raise SystemExit(f"Unknown [agent] keys: {', '.join(sorted(unknown_agent))}")
         if "max_steps" in agent:
-            val = agent["max_steps"]
-            if not isinstance(val, int) or val <= 0:
-                raise SystemExit("Config error: agent.max_steps must be a positive integer")
-            config.agent.max_steps = val
+            try:
+                config.agent.max_steps = normalize_max_steps(agent["max_steps"])
+            except ValueError as exc:
+                raise SystemExit(f"Config error: agent.{exc}") from exc
 
     if "llm" in data:
         llm = data["llm"]
@@ -393,17 +408,12 @@ def _apply_env(config: KamaConfig) -> None:
     max_steps_str = os.environ.get("KAMA_MAX_STEPS")
     if max_steps_str is not None:
         try:
-            val = int(max_steps_str)
-            if val <= 0:
-                raise SystemExit(
-                    "Config error: KAMA_MAX_STEPS must be a positive integer,"
-                    f" got: {max_steps_str!r}"
-                )
-            config.agent.max_steps = val
-        except ValueError:
+            config.agent.max_steps = normalize_max_steps(int(max_steps_str))
+        except ValueError as exc:
             raise SystemExit(
-                f"Config error: KAMA_MAX_STEPS must be an integer, got: {max_steps_str!r}"
-            )
+                "Config error: KAMA_MAX_STEPS must be a non-negative integer "
+                f"(0 means unlimited), got: {max_steps_str!r}"
+            ) from exc
 
     default_model = os.environ.get("KAMA_LLM_DEFAULT_MODEL")
     if default_model is not None:

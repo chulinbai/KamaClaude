@@ -304,17 +304,22 @@ class PermissionBlock(Static):
     def __init__(
         self, tool_use_id: str, tool_name: str, param_preview: str,
         paths: list[dict[str, Any]] | None = None,
+        history_workspaces: list[str | None] | None = None,
     ) -> None:
         self._tool_use_id = tool_use_id
         self._tool_name = tool_name
         self._param_preview = escape(param_preview)
         self._paths = paths or []
+        self._history_workspaces = history_workspaces or []
         self._resolved = False
         super().__init__(self._pending_text(), classes="log-line")
 
     # 显示完整规范化路径及作用范围，目录权限只覆盖目标及其子树
     def _path_text(self) -> str:
         lines = []
+        for workspace in self._history_workspaces:
+            lines.append("  仅检索历史（不授予项目文件访问权）：\n"
+                         f"  [bold]{escape(workspace or '未知工作区')}[/bold]")
         operations = {"create_dir": "创建目录", "write": "写文件", "read": "读文件",
                       "list": "列目录", "shell": "Shell 访问"}
         for path in self._paths:
@@ -573,7 +578,7 @@ class KamaTuiApp(App[None]):
     def __init__(
         self, host: str, port: int, replay_run_id: str | None = None,
         resume_session_id: str | None = None,
-        *, workspace: Path | None = None,
+        *, workspace: Path | None = None, max_steps: int | None = None,
     ) -> None:
         super().__init__()
         if replay_run_id is not None and resume_session_id is not None:
@@ -581,6 +586,7 @@ class KamaTuiApp(App[None]):
         self._host = host
         self._port = port
         self._workspace = workspace if workspace is not None else Path.cwd()
+        self._max_steps = max_steps
         self._replay_run_id = replay_run_id
         self._replaying = False
         self._resume_target_id = resume_session_id
@@ -892,9 +898,12 @@ class KamaTuiApp(App[None]):
         if self._client is None:
             return
         try:
+            params: dict[str, Any] = {"session_id": self._session_id, "content": content}
+            if self._max_steps is not None:
+                params["max_steps"] = self._max_steps
             await self._client.send_command(
                 "session.send_message",
-                {"session_id": self._session_id, "content": content},
+                params,
             )
         except (IpcError, RuntimeError, OSError) as e:
             self._busy = False
@@ -1300,12 +1309,15 @@ class KamaTuiApp(App[None]):
             )
             request_id = event.get("request_id")
             paths = event.get("paths", [])
+            history_workspaces = event.get("history_workspaces", [])
             key = str(request_id or tool_use_id)
             if key in self._pending_permission_blocks:
                 return
             if paths:
                 param_preview = str(event.get("params", {}).get("command", param_preview))
-            perm_block = PermissionBlock(tool_use_id, tool_name, param_preview, paths)
+            perm_block = PermissionBlock(
+                tool_use_id, tool_name, param_preview, paths, history_workspaces,
+            )
             self._pending_permission_blocks[key] = perm_block
             prompt = self._prompt()
             if prompt is not None:
@@ -1313,7 +1325,7 @@ class KamaTuiApp(App[None]):
                 prompt.border_title = "permission required"
             self._append(perm_block)
             select = PermissionSelect(
-                tool_use_id, request_id=request_id, path_request=bool(paths),
+                tool_use_id, request_id=request_id, path_request=bool(paths or history_workspaces),
                 session_id=event.get("session_id"),
             )
             self._mount_permission_select(select)

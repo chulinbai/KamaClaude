@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 
@@ -46,7 +47,9 @@ def free_port() -> int:
 
 
 @pytest.fixture
-async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[bytes], None]:
+async def running_daemon(
+    free_port: int, tmp_path: Path,
+) -> AsyncGenerator[subprocess.Popen[bytes], None]:
     env = os.environ.copy()
     env["KAMA_PORT"] = str(free_port)
     env["KAMA_LOG_FILE"] = ""
@@ -54,6 +57,8 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     # IPC 测试只验证本机协议，使用虚拟凭据与关闭的本机端口避免真实 LLM 调用。
     env["ANTHROPIC_API_KEY"] = "local-test-key"
     env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:1"
+    # 子进程的会话、历史和策略只写测试目录，避免污染真实用户数据。
+    env["USERPROFILE" if os.name == "nt" else "HOME"] = str(tmp_path)
 
     proc = subprocess.Popen([sys.executable, "-m", "kama_claude.core"], env=env)
 

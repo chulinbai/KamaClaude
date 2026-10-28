@@ -15,6 +15,7 @@ from kama_claude.core.agents.loader import AgentProfile
 from kama_claude.core.bus.events import AgentMessageEvent, AgentStateEvent
 from kama_claude.core.context import AgentContext, ExecutionContext
 from kama_claude.core.events.bus import EventBus
+from kama_claude.core.limits import normalize_max_steps
 from kama_claude.core.runs import new_run_id
 
 Executor = Callable[[ExecutionContext], Awaitable[None]]
@@ -37,7 +38,7 @@ class AgentRuntime:
     current: ExecutionContext | None = None
     task: asyncio.Task[Any] | None = None
     execute: Executor | None = None
-    max_steps: int = 20
+    max_steps: int | None = None
     accepting: bool = False
     latest_run_id: str | None = None
     tasks_dir: Path | None = None
@@ -147,23 +148,21 @@ class AgentRegistry:
 
     # 锁内把待处理消息一次性加入所属 agent 历史
     def _drain(self, agent: AgentRuntime) -> list[AgentMessage]:
-        messages = list(agent.inbox)
-        for message in messages:
-            agent.context.messages.append(
-                {
-                    "role": "user",
-                    "content": "[Agent message]\n"
-                    + json.dumps(
-                        {
-                            "message_id": message.message_id,
-                            "sender": message.sender,
-                            "message": message.content,
-                        },
-                        ensure_ascii=False,
-                    ),
-                }
+        messages = []
+        while agent.inbox:
+            message = agent.inbox.popleft()
+            messages.append(message)
+            agent.context.add_user_message(
+                "[Agent message]\n"
+                + json.dumps(
+                    {
+                        "message_id": message.message_id,
+                        "sender": message.sender,
+                        "message": message.content,
+                    },
+                    ensure_ascii=False,
+                ),
             )
-        agent.inbox.clear()
         return messages
 
     # 主输入先接收积压协作消息再追加用户输入，调用方持有会话锁
@@ -173,7 +172,7 @@ class AgentRegistry:
             if self.closed or agent.state != "IDLE":
                 raise ValueError("Main agent is busy or closed")
             messages = self._drain(agent)
-            agent.context.messages.append({"role": "user", "content": content})
+            agent.context.add_user_message(content)
         for message in messages:
             await self._message_event("main", message, "delivered")
 
@@ -187,7 +186,7 @@ class AgentRegistry:
             if agent.current is not context or not agent.accepting:
                 return False
             messages: list[AgentMessage] = []
-            if agent.inbox and context.step < context.max_steps:
+            if agent.inbox and context.has_steps_remaining():
                 messages = self._drain(agent)
             elif finishing and agent.inbox:
                 context.mark_failed("exceeded_max_steps")
@@ -247,7 +246,7 @@ class AgentRegistry:
         prompt: str,
         profile: AgentProfile | None,
         execute: Executor,
-        max_steps: int,
+        max_steps: int | None,
         runs_dir: Path,
     ) -> tuple[str, str]:
         async with self.condition:
@@ -271,7 +270,7 @@ class AgentRegistry:
                 depth=parent.depth + 1,
                 state="CREATING",
                 execute=execute,
-                max_steps=max_steps,
+                max_steps=normalize_max_steps(max_steps),
             )
             self.agents[agent_id] = agent
             context = self._start(agent, prompt)

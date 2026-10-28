@@ -64,7 +64,7 @@ class StdoutPrinter:
 
 
 # 异步核心：连接 daemon，订阅事件，触发 run，等待 run.finished
-async def _run_async(goal: str, config: KamaConfig) -> int:
+async def _run_async(goal: str, config: KamaConfig, *, max_steps: int | None = None) -> int:
     workspace = Path.cwd()
     client = SocketClient(config.host, config.port)
     try:
@@ -96,7 +96,10 @@ async def _run_async(goal: str, config: KamaConfig) -> int:
                 "scope": "global",
             },
         )
-        await client.send_command("agent.run", {"goal": goal, "workspace": str(workspace)})
+        params: dict[str, Any] = {"goal": goal, "workspace": str(workspace)}
+        if max_steps is not None:
+            params["max_steps"] = max_steps
+        await client.send_command("agent.run", params)
     except IpcError as e:
         print(f"error: {e}", file=sys.stderr)
         loop_task.cancel()
@@ -116,9 +119,9 @@ async def _run_async(goal: str, config: KamaConfig) -> int:
 
 
 # 执行 kama run --goal "..." 命令
-def cmd_run(goal: str, config: KamaConfig) -> None:
+def cmd_run(goal: str, config: KamaConfig, *, max_steps: int | None = None) -> None:
     try:
-        exit_code = asyncio.run(_run_async(goal, config))
+        exit_code = asyncio.run(_run_async(goal, config, max_steps=max_steps))
     except KeyboardInterrupt:
         sys.exit(130)
     sys.exit(exit_code)

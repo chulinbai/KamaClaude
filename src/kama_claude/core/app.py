@@ -7,6 +7,7 @@ import json
 import logging
 import signal
 import time
+import uuid
 from datetime import UTC
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,10 @@ from kama_claude.core.bus.commands import (
     AgentRunResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    HistoryReadCommand,
+    HistoryReindexCommand,
+    HistorySearchCommand,
+    HistoryStatusCommand,
     PermissionRespondCommand,
     PermissionRespondResult,
     PongResult,
@@ -48,6 +53,10 @@ from kama_claude.core.bus.envelope import INVALID_PARAMS, EventPushEnvelope, Han
 from kama_claude.core.bus.events import SessionClosedEvent
 from kama_claude.core.config import KamaConfig, get_config
 from kama_claude.core.events.bus import EventBus
+from kama_claude.core.history.access import authorize_history
+from kama_claude.core.history.index import SearchStopped
+from kama_claude.core.history.models import HistoryStatusResult
+from kama_claude.core.history.service import HistoryService
 from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.logging_setup import setup_logging
 from kama_claude.core.mcp.server import McpServerManager
@@ -82,6 +91,9 @@ class CoreApp:
         self._mcp_manager: McpServerManager | None = None
         self._session_owners: dict[str, asyncio.StreamWriter] = {}
         self._session_transition_lock = asyncio.Lock()
+        self._history: HistoryService | None = None
+        self._history_clients: dict[asyncio.StreamWriter, str] = {}
+        self._history_requests: dict[asyncio.StreamWriter, set[asyncio.Task[Any]]] = {}
         self._bus.subscribe(self._session_lifecycle)
 
     # 记录创建会话的连接，以便断连清理审批和会话路径权限
@@ -112,6 +124,14 @@ class CoreApp:
 
     # 断连立即撤销授权；忙碌任务保持原生命周期但不能继续使用被撤销的权限
     async def _client_disconnected(self, writer: asyncio.StreamWriter) -> None:
+        owner = self._history_clients.pop(writer, None)
+        if owner is not None and self._permission_manager is not None:
+            self._permission_manager.cancel_session(owner, "history_client_disconnected")
+        queries = self._history_requests.pop(writer, set())
+        for query in queries:
+            query.cancel()
+        if queries:
+            await asyncio.gather(*queries, return_exceptions=True)
         async with self._session_transition_lock:
             sessions = [sid for sid, owner in self._session_owners.items() if owner is writer]
             for sid in sessions:
@@ -162,7 +182,9 @@ class CoreApp:
         self._own_session(session.id)
         run_id = new_run_id()
         run_task = asyncio.create_task(
-            self._sessions.send_message(session.id, cmd.goal, run_id=run_id)
+            self._sessions.send_message(
+                session.id, cmd.goal, run_id=run_id, max_steps=cmd.max_steps,
+            )
         )
         self._running_runs.add(run_task)
         run_task.add_done_callback(self._running_runs.discard)
@@ -189,7 +211,9 @@ class CoreApp:
         if task is not None:
             self._running_runs.add(task)
         try:
-            run_id = await self._sessions.send_message(cmd.session_id, cmd.content)
+            run_id = await self._sessions.send_message(
+                cmd.session_id, cmd.content, max_steps=cmd.max_steps,
+            )
         finally:
             if task is not None:
                 self._running_runs.discard(task)
@@ -321,11 +345,82 @@ class CoreApp:
         if cmd.request_id:
             sid = self._permission_manager.request_session(cmd.request_id)
             owner = self._session_owners.get(sid or "")
+            if owner is None:
+                owner = next((writer for writer, client_id in self._history_clients.items()
+                              if client_id == sid), None)
             if owner is not None and get_connection_writer() is not owner:
                 return PermissionRespondResult(ok=False)
         return PermissionRespondResult(ok=self._permission_manager.respond(
             cmd.tool_use_id, cmd.decision, cmd.request_id, session_id=cmd.session_id,
         ))
+
+    # 对独立历史客户端建立连接级授权，并在断连时停止对应工作线程
+    async def _history_request(
+        self, cmd: HistorySearchCommand | HistoryReadCommand
+        | HistoryStatusCommand | HistoryReindexCommand,
+    ) -> BaseModel:
+        if self._history is None:
+            raise HandlerError(-32030, "history service unavailable")
+        workspace = Path(cmd.workspace).resolve() if cmd.workspace else Path.cwd()
+        if cmd.workspace and not Path(cmd.workspace).is_absolute():
+            raise HandlerError(INVALID_PARAMS, "workspace must be absolute")
+        if not workspace.is_dir():
+            raise HandlerError(INVALID_PARAMS, "workspace must exist")
+        writer = get_connection_writer()
+        if writer.is_closing():
+            raise HandlerError(-32031, "history client disconnected")
+        owner = self._history_clients.setdefault(writer, f"history-{uuid.uuid4().hex}")
+        task = asyncio.current_task()
+        assert task is not None
+        self._history_requests.setdefault(writer, set()).add(task)
+
+        # 范围审批只推送给请求所属连接，不广播其他工作区信息
+        async def emit(raw: dict[str, Any]) -> None:
+            writer.write(EventPushEnvelope(event=raw).model_dump_json().encode() + b"\n")
+            await writer.drain()
+
+        try:
+            allowed = await authorize_history(
+                self._history, workspace, cmd.scope, manager=self._permission_manager,
+                owner_id=owner, tool_name=cmd.type.replace(".", "_"),
+                tool_use_id=uuid.uuid4().hex, emit=emit,
+            )
+            if isinstance(cmd, HistorySearchCommand):
+                return await self._history.search(cmd, workspace, allowed)
+            if isinstance(cmd, HistoryReadCommand):
+                return await self._history.read(cmd, workspace, allowed)
+            status = await self._history.status(
+                workspace, cmd.scope, allowed, rebuild=isinstance(cmd, HistoryReindexCommand),
+            )
+            return HistoryStatusResult.model_validate(status)
+        except PermissionError as exc:
+            raise HandlerError(-32031, str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HandlerError(-32032, str(exc)) from exc
+        except SearchStopped as exc:
+            raise HandlerError(-32033, "history read timed out") from exc
+        except ValueError as exc:
+            raise HandlerError(INVALID_PARAMS, str(exc)) from exc
+        except OSError as exc:
+            raise HandlerError(-32030, str(exc)) from exc
+        finally:
+            self._history_requests.get(writer, set()).discard(task)
+
+    # 校验历史搜索协议并调用共享服务
+    async def _history_search_handler(self, params: dict[str, Any]) -> BaseModel:
+        return await self._history_request(HistorySearchCommand.model_validate(params))
+
+    # 校验历史读取协议并重新检查记录范围
+    async def _history_read_handler(self, params: dict[str, Any]) -> BaseModel:
+        return await self._history_request(HistoryReadCommand.model_validate(params))
+
+    # 查询分片体积与索引构建状态
+    async def _history_status_handler(self, params: dict[str, Any]) -> BaseModel:
+        return await self._history_request(HistoryStatusCommand.model_validate(params))
+
+    # 后台重建派生索引而不修改历史归档
+    async def _history_reindex_handler(self, params: dict[str, Any]) -> BaseModel:
+        return await self._history_request(HistoryReindexCommand.model_validate(params))
 
     # 手动压缩 session thread，将摘要持久化写入 thread.jsonl
     async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
@@ -424,7 +519,8 @@ class CoreApp:
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)
         sessions_root = Path("~/.kama/sessions").expanduser()
-        store = SessionStore(sessions_root)
+        store = SessionStore(sessions_root, self._config.history)
+        self._history = HistoryService(store)
         assert self._config is not None
         compact_provider = AnthropicProvider(self._config.llm.default_model)
 
@@ -441,6 +537,7 @@ class CoreApp:
                 trace=self._trace,
                 permission_manager=self._permission_manager,
                 mcp_manager=self._mcp_manager,
+                history_service=self._history,
             ),
             bus=self._bus,
             provider=compact_provider,
@@ -464,6 +561,10 @@ class CoreApp:
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)
+        server.register("history.search", self._history_search_handler)
+        server.register("history.read", self._history_read_handler)
+        server.register("history.status", self._history_status_handler)
+        server.register("history.reindex", self._history_reindex_handler)
         server.register("subagent.list", self._subagent_list_handler)
         server.register("subagent.result", self._subagent_result_handler)
         server.register("subagent.send_input", self._subagent_send_handler)
@@ -504,6 +605,8 @@ class CoreApp:
         if self._mcp_manager is not None:
             await self._mcp_manager.stop_all()
         await server.stop()
+        if self._history is not None:
+            await self._history.close()
         if self._trace is not None:
             await self._trace.stop()
 

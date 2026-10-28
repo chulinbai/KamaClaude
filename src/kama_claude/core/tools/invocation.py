@@ -182,6 +182,7 @@ async def invoke_tool(
     async def execute() -> ToolResult:
         if permission_manager is not None and permission_manager.is_closed(session_id):
             raise PathAccessError("Session closed; path authorization has been revoked")
+        await tool.prepare(dict(tool_call.input), tool_call.id)
         if access is None:
             return await tool.invoke(dict(tool_call.input))
         with path_execution(access, grants):

@@ -21,12 +21,15 @@ from kama_claude.core.transport.socket_server import SocketServer
 
 # 启动真实协议服务和指定工作区存储，仅替换 LLM 输出
 @asynccontextmanager
-async def _server(store: SessionStore, workspace: Path, port: int, provider: Mock):
+async def _server(
+    store: SessionStore, workspace: Path, port: int, provider: Mock,
+    *, config: KamaConfig | None = None,
+):
     app = CoreApp()
     app._permission_manager = PermissionManager(timeout_s=0)
     app._sessions = SessionManager(
         store, lambda: AgentRunner(
-            KamaConfig(), provider=provider, bus=app._bus,
+            config or KamaConfig(), provider=provider, bus=app._bus,
             permission_manager=app._permission_manager,
         ), app._bus, workspace=workspace,
     )
@@ -36,6 +39,7 @@ async def _server(store: SessionStore, workspace: Path, port: int, provider: Moc
     server = SocketServer("127.0.0.1", port, broadcaster, on_disconnect=app._client_disconnected)
     for method, handler in {
         "event.subscribe": app._subscribe_handler,
+        "agent.run": app._agent_run_handler,
         "session.create": app._session_create_handler,
         "session.list": app._session_list_handler,
         "session.resume": app._session_resume_handler,

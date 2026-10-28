@@ -4,9 +4,22 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from kama_claude.core.limits import normalize_max_steps
+
 if TYPE_CHECKING:
     from kama_claude.core.agents.loader import AgentProfile
+    from kama_claude.core.history.archive import HistoryArchive
+    from kama_claude.core.history.models import HistoryRecord, RecordKind
     from kama_claude.core.subagent.registry import AgentRegistry
+
+
+@dataclass
+class _HistoryWrite:
+    kind: RecordKind
+    content: Any
+    run_id: str | None
+    source: dict[str, Any]
+    record: HistoryRecord | None = None
 
 
 @dataclass
@@ -19,6 +32,55 @@ class AgentContext:
     messages: list[dict[str, Any]] = field(default_factory=list)
     persisted_count: int = 0
     history_replaced: bool = False
+    archive: HistoryArchive | None = field(default=None, repr=False)
+    history_run_id: str | None = None
+    pending_history: list[_HistoryWrite] = field(default_factory=list, repr=False)
+
+    # 将主会话中新产生的消息归档，子会话没有归档接收器时保持原行为
+    def record(
+        self, kind: RecordKind, content: Any, *, source: dict[str, Any] | None = None,
+    ) -> None:
+        if self.archive is not None:
+            self.pending_history.append(_HistoryWrite(
+                kind, deepcopy(content), self.history_run_id, deepcopy(source or {}),
+            ))
+            self.flush_history()
+
+    # 重试尚未提交的原文，保留首次分配的身份且绝不重新执行工具
+    def flush_history(self) -> None:
+        if self.archive is None:
+            return
+        while self.pending_history:
+            pending = self.pending_history[0]
+
+            # 在归档写锁内记住身份，部分写入失败后可安全检查重复提交
+            def prepared(record: HistoryRecord) -> None:
+                pending.record = record
+
+            if pending.record is None:
+                self.archive.emit(
+                    pending.kind, {"content": pending.content}, pending.run_id,
+                    source=pending.source, prepared=prepared,
+                )
+            else:
+                self.archive.append_record(pending.record)
+            self.pending_history.pop(0)
+
+    # 保留已接收的原文并立即归档，写入失败时本轮停止且原文仍可重试
+    def add_user_message(self, content: str) -> None:
+        self.messages.append({"role": "user", "content": content})
+        self.record("user_message", content)
+
+    # 压缩前持久化原文与带覆盖边界的摘要，失败时不得替换当前消息
+    def record_compaction(self, summary: str) -> None:
+        if self.archive is not None:
+            self.flush_history()
+            checkpoint = self.archive.checkpoint()
+            self.record(
+                "compaction_summary", summary,
+                source={"covers_through_sequence": checkpoint.sequence},
+            )
+            self.archive.checkpoint()
 
 
 class ExecutionContext:
@@ -27,7 +89,7 @@ class ExecutionContext:
         self,
         run_id: str,
         goal: str,
-        max_steps: int,
+        max_steps: int | None = None,
         prefill_messages: list[dict[str, Any]] | None = None,
         session_notes: str = "",
         global_context: str = "",
@@ -53,7 +115,7 @@ class ExecutionContext:
         )
         self.run_id = run_id
         self.goal = goal
-        self.max_steps = max_steps
+        self.max_steps = normalize_max_steps(max_steps)
         self.session_notes = session_notes
         self.global_context = global_context
         self.project_context = project_context
@@ -112,6 +174,7 @@ class ExecutionContext:
     # 将 LLM 响应的 content blocks 追加为 assistant 消息
     def add_assistant_message(self, content: list[Any]) -> None:
         self.messages.append({"role": "assistant", "content": content})
+        self.agent_context.record("assistant_message", content)
 
     # 将工具调用结果追加为 user 消息；同一步的多个结果共享同一条消息
     def add_tool_result(
@@ -125,6 +188,17 @@ class ExecutionContext:
         if is_error:
             block["is_error"] = True
 
+        tool_name = ""
+        for message in reversed(self.messages):
+            blocks = message.get("content")
+            if isinstance(blocks, list):
+                for item in blocks:
+                    if item.get("type") == "tool_use" and item.get("id") == tool_use_id:
+                        tool_name = str(item.get("name", ""))
+                        break
+            if tool_name:
+                break
+
         last = self.messages[-1] if self.messages else None
         if (
             last is not None
@@ -136,10 +210,17 @@ class ExecutionContext:
             last["content"].append(block)
         else:
             self.messages.append({"role": "user", "content": [block]})
+        self.agent_context.record(
+            "tool_result", [block], source={"tool_name": tool_name, "tool_use_id": tool_use_id},
+        )
 
     # 返回 True 表示 loop 应停止（状态不再是 running）
     def is_done(self) -> bool:
         return self.status != "running"
+
+    # 判断本轮还能否调用模型，无上限时始终允许下一步
+    def has_steps_remaining(self) -> bool:
+        return self.max_steps is None or self.step < self.max_steps
 
     # 将 run 标记为成功
     def mark_success(self) -> None:

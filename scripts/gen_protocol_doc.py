@@ -12,6 +12,10 @@ from kama_claude.core.bus.commands import (
     AgentRunResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    HistoryReadCommand,
+    HistoryReindexCommand,
+    HistorySearchCommand,
+    HistoryStatusCommand,
     PermissionRespondCommand,
     PermissionRespondResult,
     PingCommand,
@@ -61,6 +65,11 @@ from kama_claude.core.bus.events import (
     ToolCallFailedEvent,
     ToolCallFinishedEvent,
     ToolCallStartedEvent,
+)
+from kama_claude.core.history.models import (
+    HistoryReadResult,
+    HistorySearchResult,
+    HistoryStatusResult,
 )
 
 _OUTPUT_PATH = Path(__file__).parent.parent / "WIRE_PROTOCOL.md"
@@ -222,6 +231,21 @@ def generate() -> str:
         _model_section("SessionGetHistoryCommand", SessionGetHistoryCommand),
         "\n",
         _model_section("SessionGetHistoryResult", SessionGetHistoryResult),
+        "\n## History retrieval\n\n"
+        "History commands do not create chat sessions or call a model. workspace defaults to "
+        "the daemon startup directory. scope=all requires separate history-scope approval; "
+        "a CLI connection owns its temporary authorization. record_id is not an access grant. "
+        "complete reports search coverage; truncated reports result limits. Read pagination "
+        "uses offset/next_offset with the same record_id, before and after. "
+        "Errors: -32030 storage unavailable; -32031 permission denied; -32032 missing record; "
+        "-32033 read timeout; -32602 invalid parameters.\n\n",
+        _model_section("history.search", HistorySearchCommand),
+        _model_section("HistorySearchResult", HistorySearchResult),
+        _model_section("history.read", HistoryReadCommand),
+        _model_section("HistoryReadResult", HistoryReadResult),
+        _model_section("history.status", HistoryStatusCommand),
+        _model_section("history.reindex", HistoryReindexCommand),
+        _model_section("HistoryStatusResult", HistoryStatusResult),
         "\n",
         _model_section("SessionCloseCommand", SessionCloseCommand),
         "\n",

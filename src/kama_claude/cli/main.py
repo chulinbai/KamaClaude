@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import sys
 
+from kama_claude.cli.arguments import parse_max_steps
 from kama_claude.cli.commands.chat import cmd_chat
 from kama_claude.cli.commands.core import cmd_core_start, cmd_core_status, cmd_core_stop
+from kama_claude.cli.commands.history import add_history_parser, cmd_history
 from kama_claude.cli.commands.ping import cmd_ping
 from kama_claude.cli.commands.run import cmd_run
 from kama_claude.cli.commands.trace import cmd_trace
@@ -18,12 +20,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="kama", description="KamaClaude CLI")
     parser.add_argument("--version", action="store_true", help="Print version and exit")
     subparsers = parser.add_subparsers(dest="command")
+    add_history_parser(subparsers)
 
     subparsers.add_parser("ping", help="Ping the core daemon")
-    subparsers.add_parser("chat", help="Start a multi-turn chat session")
+    chat_parser = subparsers.add_parser("chat", help="Start a multi-turn chat session")
 
     run_parser = subparsers.add_parser("run", help="Run an agent task")
     run_parser.add_argument("--goal", required=True, help="Goal for the agent to accomplish")
+    for task_parser in (chat_parser, run_parser):
+        task_parser.add_argument(
+            "--max-steps", type=parse_max_steps, metavar="N",
+            help="Limit each run to N model steps; 0 means unlimited (default: Core config)",
+        )
 
     core_parser = subparsers.add_parser("core", help="Manage the core daemon")
     core_sub = core_parser.add_subparsers(dest="core_command")
@@ -50,9 +58,11 @@ def main() -> None:
     if args.command == "ping":
         cmd_ping(config)
     elif args.command == "chat":
-        cmd_chat(config)
+        cmd_chat(config, max_steps=args.max_steps)
+    elif args.command == "history":
+        cmd_history(args, config)
     elif args.command == "run":
-        cmd_run(args.goal, config)
+        cmd_run(args.goal, config, max_steps=args.max_steps)
     elif args.command == "core":
         if args.core_command == "start":
             cmd_core_start(config)
